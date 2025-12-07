@@ -18,6 +18,10 @@ import * as random from 'maath/random';
 import { GestureRecognizer, FilesetResolver, DrawingUtils } from "@mediapipe/tasks-vision";
 import { photos as photoAssets } from 'virtual:photos';
 import { musicTracks } from 'virtual:music';
+import { WalineCommentBox, useWalineComments } from './WalineIntegration';
+import type { WalineComment } from './WalineIntegration';
+import { AuthManager } from './AuthManager';
+import { isWalineConfigured, FEATURE_FLAGS, DENSITY_CONFIG, UI_CONFIG } from './waline-config';
 import './App.css';
 
 const FALLBACK_PHOTO = 'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" fill="none"><rect width="512" height="512" rx="28" fill="%23004225"/><circle cx="256" cy="180" r="90" fill="%23FFD700"/><text x="50%" y="78%" dominant-baseline="middle" text-anchor="middle" fill="white" font-size="64" font-family="sans-serif">&#127876;</text></svg>';
@@ -40,10 +44,10 @@ const CONFIG = {
     candyColors: ['#FF0000', '#FFFFFF']
   },
   counts: {
-    foliage: 20000,
-    ornaments: 160,   // 拍立得照片数量（降低密度）
-    elements: 180,    // 圣诞元素数量
-    lights: 200       // 彩灯数量
+    foliage: DENSITY_CONFIG.foliage,
+    ornaments: DENSITY_CONFIG.photos,
+    elements: DENSITY_CONFIG.elements,
+    lights: DENSITY_CONFIG.lights
   },
   tree: { height: 22, radius: 9 } // 树体尺寸
 };
@@ -254,31 +258,22 @@ const Foliage = ({ state, count, sizeMultiplier = 1 }: { state: 'CHAOS' | 'FORME
   );
 };
 
-type PhotoOpenPayload = { url: string; screenPosition: { x: number; y: number } };
-type PhotoOrnamentsHandle = { openRandomPhoto: () => PhotoOpenPayload | null };
-type PhotoOrnamentsProps = { state: 'CHAOS' | 'FORMED', photoUrls: string[], onPhotoOpen?: (p: PhotoOpenPayload) => void };
+type PhotoOrnamentsProps = { state: 'CHAOS' | 'FORMED', photoUrls: string[] };
 
-// --- Component: Photo Ornaments (Double-Sided Polaroid) ---
-const PhotoOrnaments = forwardRef(function PhotoOrnamentsComponent(
-  props: PhotoOrnamentsProps & { ornamentCount?: number },
-  ref: React.ForwardedRef<PhotoOrnamentsHandle>
+type EnvelopeOpenPayload = { comment: any; screenPosition: { x: number; y: number } };
+type EnvelopeOrnamentsHandle = { openRandomEnvelope: () => EnvelopeOpenPayload | null };
+type EnvelopeOrnamentsProps = { state: 'CHAOS' | 'FORMED', comments: any[], onEnvelopeOpen?: (p: EnvelopeOpenPayload) => void };
+
+// --- Component: Photo Ornaments (简化版,仅展示) ---
+const PhotoOrnaments = function PhotoOrnamentsComponent(
+  props: PhotoOrnamentsProps & { ornamentCount?: number }
 ) {
-  const { state, photoUrls, onPhotoOpen, ornamentCount } = props;
+  const { state, photoUrls, ornamentCount } = props;
   const textures = useTexture(photoUrls);
   const count = ornamentCount ?? CONFIG.counts.ornaments;
   const groupRef = useRef<THREE.Group>(null);
-  const { size, camera } = useThree();
 
-  const borderGeometry = useMemo(() => new THREE.PlaneGeometry(1.2, 1.5), []);
   const photoGeometry = useMemo(() => new THREE.PlaneGeometry(1, 1), []);
-
-  const projectToScreen = useCallback((pos: THREE.Vector3) => {
-    const projected = pos.clone().project(camera);
-    return {
-      x: (projected.x * 0.5 + 0.5) * size.width,
-      y: (-projected.y * 0.5 + 0.5) * size.height
-    };
-  }, [camera, size.height, size.width]);
 
   const data = useMemo(() => {
     return new Array(count).fill(0).map((_, i) => {
@@ -286,14 +281,13 @@ const PhotoOrnaments = forwardRef(function PhotoOrnamentsComponent(
       const h = CONFIG.tree.height; const y = (Math.random() * h) - (h / 2);
       const rBase = CONFIG.tree.radius;
       const baseRadius = (rBase * (1 - (y + (h/2)) / h)) + 0.5;
-      const currentRadius = baseRadius * 0.82 + 0.2; // 更靠内，叶子包裹照片
+      const currentRadius = baseRadius * 0.82 + 0.2;
       const theta = Math.random() * Math.PI * 2;
       const targetPos = new THREE.Vector3(currentRadius * Math.cos(theta), y, currentRadius * Math.sin(theta));
 
       const isBig = Math.random() < 0.2;
       const baseScale = isBig ? 2.2 : 0.8 + Math.random() * 0.6;
       const weight = 0.8 + Math.random() * 1.2;
-      const borderColor = CONFIG.colors.borders[Math.floor(Math.random() * CONFIG.colors.borders.length)];
 
       const rotationSpeed = {
         x: (Math.random() - 0.5) * 1.0,
@@ -310,7 +304,6 @@ const PhotoOrnaments = forwardRef(function PhotoOrnamentsComponent(
       return {
         chaosPos, targetPos, scale: baseScale, weight,
         textureIndex: i % textures.length,
-        borderColor,
         currentPos: chaosPos.clone(),
         chaosRotation,
         rotationSpeed,
@@ -351,27 +344,154 @@ const PhotoOrnaments = forwardRef(function PhotoOrnamentsComponent(
     });
   });
 
-  const openFromGroup = useCallback((group: THREE.Object3D, textureIndex: number) => {
+  return (
+    <group ref={groupRef}>
+      {data.map((obj, i) => (
+        <group
+          key={i}
+          scale={[obj.scale, obj.scale, obj.scale]}
+          rotation={state === 'CHAOS' ? obj.chaosRotation : [0,0,0]}
+        >
+          <mesh geometry={photoGeometry}>
+            <meshBasicMaterial map={textures[obj.textureIndex]} side={THREE.DoubleSide} transparent opacity={0.95} />
+          </mesh>
+        </group>
+      ))}
+    </group>
+  );
+};
+
+// --- Component: Envelope Ornaments (信封祝福) ---
+const EnvelopeOrnaments = forwardRef(function EnvelopeOrnamentsComponent(
+  props: EnvelopeOrnamentsProps & { ornamentCount?: number },
+  ref: React.ForwardedRef<EnvelopeOrnamentsHandle>
+) {
+  const { state, comments, onEnvelopeOpen, ornamentCount } = props;
+  // 使用配置的信封数量，如果评论为空则也显示信封（占位符模式）
+  const count = ornamentCount ?? 50;
+  const groupRef = useRef<THREE.Group>(null);
+  const { size, camera } = useThree();
+
+  const envelopeGeometry = useMemo(() => new THREE.PlaneGeometry(1.0, 0.7), []);
+  const flapGeometry = useMemo(() => {
+    const shape = new THREE.Shape();
+    shape.moveTo(-0.5, 0);
+    shape.lineTo(0, 0.35);
+    shape.lineTo(0.5, 0);
+    shape.lineTo(-0.5, 0);
+    return new THREE.ShapeGeometry(shape);
+  }, []);
+
+  const projectToScreen = useCallback((pos: THREE.Vector3) => {
+    const projected = pos.clone().project(camera);
+    return {
+      x: (projected.x * 0.5 + 0.5) * size.width,
+      y: (-projected.y * 0.5 + 0.5) * size.height
+    };
+  }, [camera, size.height, size.width]);
+
+  const data = useMemo(() => {
+    if (count === 0) return [];
+    return new Array(count).fill(0).map((_, i) => {
+      const chaosPos = new THREE.Vector3((Math.random()-0.5)*70, (Math.random()-0.5)*70, (Math.random()-0.5)*70);
+      const h = CONFIG.tree.height; const y = (Math.random() * h) - (h / 2);
+      const rBase = CONFIG.tree.radius;
+      const baseRadius = (rBase * (1 - (y + (h/2)) / h)) + 0.5;
+      const currentRadius = baseRadius * 0.75 + 0.3;
+      const theta = Math.random() * Math.PI * 2;
+      const targetPos = new THREE.Vector3(currentRadius * Math.cos(theta), y, currentRadius * Math.sin(theta));
+
+      const baseScale = 0.6 + Math.random() * 0.4;
+      const weight = 0.8 + Math.random() * 1.2;
+      const envelopeColor = ['#FFE4E1', '#FFF8DC', '#F0E68C', '#E6E6FA', '#FFB6C1'][Math.floor(Math.random() * 5)];
+
+      const rotationSpeed = {
+        x: (Math.random() - 0.5) * 0.8,
+        y: (Math.random() - 0.5) * 0.8,
+        z: (Math.random() - 0.5) * 0.8
+      };
+      const tilt = {
+        x: (Math.random() - 0.5) * 0.3,
+        y: (Math.random() - 0.5) * 0.5,
+        z: (Math.random() - 0.5) * 0.3
+      };
+      const chaosRotation = new THREE.Euler(Math.random()*Math.PI, Math.random()*Math.PI, Math.random()*Math.PI);
+
+      return {
+        chaosPos, targetPos, scale: baseScale, weight,
+        // 如果没有评论，commentIndex 设为 -1 表示无效
+        commentIndex: comments.length > 0 ? i % comments.length : -1,
+        envelopeColor,
+        currentPos: chaosPos.clone(),
+        chaosRotation,
+        rotationSpeed,
+        wobbleOffset: Math.random() * 10,
+        wobbleSpeed: 0.5 + Math.random() * 0.5,
+        tilt
+      };
+    });
+  }, [comments, count]);
+
+  useFrame((stateObj, delta) => {
+    if (!groupRef.current) return;
+    const isFormed = state === 'FORMED';
+    const time = stateObj.clock.elapsedTime;
+
+    groupRef.current.children.forEach((group, i) => {
+      if (i >= data.length) return;
+      const objData = data[i];
+      const target = isFormed ? objData.targetPos : objData.chaosPos;
+
+      objData.currentPos.lerp(target, delta * (isFormed ? 0.8 * objData.weight : 0.5));
+      group.position.copy(objData.currentPos);
+
+      if (isFormed) {
+        const targetLookPos = new THREE.Vector3(group.position.x * 2, group.position.y + 0.5, group.position.z * 2);
+        group.lookAt(targetLookPos);
+
+        const wobbleX = Math.sin(time * objData.wobbleSpeed + objData.wobbleOffset) * 0.05;
+        const wobbleZ = Math.cos(time * objData.wobbleSpeed * 0.8 + objData.wobbleOffset) * 0.05;
+        group.rotation.x += objData.tilt.x + wobbleX;
+        group.rotation.y += objData.tilt.y * 0.6;
+        group.rotation.z += objData.tilt.z + wobbleZ;
+      } else {
+        group.rotation.x += delta * objData.rotationSpeed.x;
+        group.rotation.y += delta * objData.rotationSpeed.y;
+        group.rotation.z += delta * objData.rotationSpeed.z;
+      }
+    });
+  });
+
+  const openFromGroup = useCallback((group: THREE.Object3D, commentIndex: number) => {
+    // 如果没有评论，不打开信封
+    if (commentIndex < 0 || comments.length === 0) return;
+    
     const worldPos = new THREE.Vector3();
     group.getWorldPosition(worldPos);
     const screenPosition = projectToScreen(worldPos);
-    const url = photoUrls[textureIndex % photoUrls.length] || FALLBACK_PHOTO;
-    onPhotoOpen?.({ url, screenPosition });
-  }, [photoUrls, projectToScreen, onPhotoOpen]);
+    const comment = comments[commentIndex % comments.length];
+    onEnvelopeOpen?.({ comment, screenPosition });
+  }, [comments, projectToScreen, onEnvelopeOpen]);
 
   useImperativeHandle(ref, () => ({
-    openRandomPhoto: () => {
-      if (!groupRef.current || !groupRef.current.children.length) return null;
+    openRandomEnvelope: () => {
+      if (!groupRef.current || !groupRef.current.children.length || comments.length === 0) return null;
       const child = groupRef.current.children[Math.floor(Math.random() * groupRef.current.children.length)];
-      const texIndex = (child as any).userData?.textureIndex ?? 0;
+      const commentIndex = (child as any).userData?.commentIndex ?? -1;
+      
+      // 如果没有有效评论，返回 null
+      if (commentIndex < 0 || comments.length === 0) return null;
+      
       const worldPos = new THREE.Vector3();
       child.getWorldPosition(worldPos);
       return {
-        url: photoUrls[texIndex % photoUrls.length] || FALLBACK_PHOTO,
+        comment: comments[commentIndex % comments.length],
         screenPosition: projectToScreen(worldPos)
       };
     }
-  }), [photoUrls, projectToScreen]);
+  }), [comments, projectToScreen]);
+
+  if (count === 0) return null;
 
   return (
     <group ref={groupRef}>
@@ -380,40 +500,39 @@ const PhotoOrnaments = forwardRef(function PhotoOrnamentsComponent(
           key={i}
           scale={[obj.scale, obj.scale, obj.scale]}
           rotation={state === 'CHAOS' ? obj.chaosRotation : [0,0,0]}
-          userData={{ textureIndex: obj.textureIndex }}
+          userData={{ commentIndex: obj.commentIndex }}
           onPointerDown={(e) => {
             e.stopPropagation();
-            openFromGroup(e.object, obj.textureIndex);
+            openFromGroup(e.object, obj.commentIndex);
           }}
         >
-          {/* 正面 */}
-          <group position={[0, 0, 0.015]}>
-            <mesh geometry={photoGeometry}>
-              <meshStandardMaterial
-                map={textures[obj.textureIndex]}
-                roughness={0.5} metalness={0}
-                emissive={CONFIG.colors.white} emissiveMap={textures[obj.textureIndex]} emissiveIntensity={1.0}
-                side={THREE.FrontSide}
-              />
-            </mesh>
-            <mesh geometry={borderGeometry} position={[0, -0.15, -0.01]}>
-              <meshStandardMaterial color={obj.borderColor} roughness={0.9} metalness={0} side={THREE.FrontSide} />
-            </mesh>
-          </group>
-          {/* 背面 */}
-          <group position={[0, 0, -0.015]} rotation={[0, Math.PI, 0]}>
-            <mesh geometry={photoGeometry}>
-              <meshStandardMaterial
-                map={textures[obj.textureIndex]}
-                roughness={0.5} metalness={0}
-                emissive={CONFIG.colors.white} emissiveMap={textures[obj.textureIndex]} emissiveIntensity={1.0}
-                side={THREE.FrontSide}
-              />
-            </mesh>
-            <mesh geometry={borderGeometry} position={[0, -0.15, -0.01]}>
-              <meshStandardMaterial color={obj.borderColor} roughness={0.9} metalness={0} side={THREE.FrontSide} />
-            </mesh>
-          </group>
+          {/* 信封主体 */}
+          <mesh geometry={envelopeGeometry} position={[0, 0, 0]}>
+            <meshStandardMaterial 
+              color={obj.envelopeColor} 
+              roughness={0.6} 
+              metalness={0.1}
+              emissive={obj.envelopeColor}
+              emissiveIntensity={0.3}
+            />
+          </mesh>
+          {/* 信封封口 */}
+          <mesh geometry={flapGeometry} position={[0, 0.175, 0.01]}>
+            <meshStandardMaterial 
+              color={obj.envelopeColor}
+              roughness={0.7} 
+              metalness={0.1}
+            />
+          </mesh>
+          {/* 爱心装饰 */}
+          <mesh position={[0, 0, 0.02]}>
+            <sphereGeometry args={[0.12, 16, 16]} />
+            <meshStandardMaterial 
+              color="#FF69B4" 
+              emissive="#FF1493"
+              emissiveIntensity={0.5}
+            />
+          </mesh>
         </group>
       ))}
     </group>
@@ -581,7 +700,27 @@ const TopStar = ({ state, onClick }: { state: 'CHAOS' | 'FORMED', onClick: () =>
 };
 
 // --- Main Scene Experience ---
-const Experience = ({ sceneState, photoUrls, onStarClick, onPhotoOpen, ornamentsRef, fogColor, isMobile, counts }: { sceneState: 'CHAOS' | 'FORMED', photoUrls: string[], onStarClick: () => void, onPhotoOpen: (p: PhotoOpenPayload) => void, ornamentsRef: React.RefObject<PhotoOrnamentsHandle>, fogColor: string, isMobile: boolean, counts: typeof CONFIG.counts }) => {
+const Experience = ({ 
+  sceneState, 
+  photoUrls, 
+  onStarClick, 
+  envelopesRef,
+  comments,
+  onEnvelopeOpen,
+  fogColor, 
+  isMobile, 
+  counts 
+}: { 
+  sceneState: 'CHAOS' | 'FORMED', 
+  photoUrls: string[], 
+  onStarClick: () => void, 
+  envelopesRef: React.RefObject<EnvelopeOrnamentsHandle>,
+  comments: any[],
+  onEnvelopeOpen: (p: EnvelopeOpenPayload) => void,
+  fogColor: string, 
+  isMobile: boolean, 
+  counts: typeof CONFIG.counts 
+}) => {
   const controlsRef = useRef<any>(null);
   useFrame(() => {
     if (controlsRef.current) controlsRef.current.update();
@@ -598,8 +737,8 @@ const Experience = ({ sceneState, photoUrls, onStarClick, onPhotoOpen, ornaments
         dampingFactor={0.08}
         minDistance={30}
         maxDistance={120}
-        autoRotate={sceneState === 'FORMED'}
-        autoRotateSpeed={-0.6}
+        autoRotate={sceneState === 'FORMED' && UI_CONFIG.treeRotationSpeed > 0}
+        autoRotateSpeed={-0.6 * UI_CONFIG.treeRotationSpeed}
         maxPolarAngle={Math.PI / 1.7}
       />
 
@@ -616,10 +755,11 @@ const Experience = ({ sceneState, photoUrls, onStarClick, onPhotoOpen, ornaments
         {sceneState === 'FORMED' && <Trunk />}
         <Foliage state={sceneState} count={Math.floor(counts.foliage * 0.5)} sizeMultiplier={1.6} />
         <Suspense fallback={null}>
-          <PhotoOrnaments ref={ornamentsRef} state={sceneState} photoUrls={photoUrls} onPhotoOpen={onPhotoOpen} ornamentCount={counts.ornaments} />
-           <ChristmasElements state={sceneState} count={counts.elements} />
-           <FairyLights state={sceneState} count={counts.lights} />
-            <TopStar state={sceneState} onClick={onStarClick} />
+          <PhotoOrnaments state={sceneState} photoUrls={photoUrls} ornamentCount={counts.ornaments} />
+          <EnvelopeOrnaments ref={envelopesRef} state={sceneState} comments={comments} onEnvelopeOpen={onEnvelopeOpen} ornamentCount={DENSITY_CONFIG.envelopes} />
+          <ChristmasElements state={sceneState} count={counts.elements} />
+          <FairyLights state={sceneState} count={counts.lights} />
+          <TopStar state={sceneState} onClick={onStarClick} />
         </Suspense>
         <Sparkles count={isMobile ? 120 : 220} scale={45} size={6.5} speed={0.32} opacity={0.3} color={CONFIG.colors.silver} />
       </group>
@@ -635,13 +775,19 @@ const Experience = ({ sceneState, photoUrls, onStarClick, onPhotoOpen, ornaments
 
 // --- Gesture Controller ---
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-const GestureController = ({ onGesture, onStatus, onPinchStart, onPinchEnd, debugMode }: any) => {
+const GestureController = ({ onGesture, onStatus, onPinchStart, debugMode }: any) => {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const pinchActiveRef = useRef(false);
   const pinchBlockUntilRef = useRef(0);
 
   useEffect(() => {
+    // 检查是否启用手势控制
+    if (!FEATURE_FLAGS.enableGestureControl) {
+      onStatus("GESTURE CONTROL DISABLED");
+      return;
+    }
+
     let gestureRecognizer: GestureRecognizer;
     let requestRef: number;
 
@@ -724,15 +870,13 @@ const GestureController = ({ onGesture, onStatus, onPinchStart, onPinchEnd, debu
                 if (isPinching && !pinchActiveRef.current) {
                   pinchActiveRef.current = true;
                   if (onPinchStart) onPinchStart();
-                  if (debugMode) onStatus("PINCH: PHOTO MODE");
+                  if (debugMode) onStatus("PINCH: 抽祝福");
                 } else if (!isPinching && pinchActiveRef.current) {
                   pinchActiveRef.current = false;
-                  if (onPinchEnd) onPinchEnd();
                 }
               } else if (pinchActiveRef.current) {
                 // 如果在捏合状态但检测到手势或屏蔽期，强制结束捏合
                 pinchActiveRef.current = false;
-                if (onPinchEnd) onPinchEnd();
               }
             } else { 
               if (debugMode) onStatus("AI READY: NO HAND"); 
@@ -743,7 +887,7 @@ const GestureController = ({ onGesture, onStatus, onPinchStart, onPinchEnd, debu
     };
     setup();
     return () => cancelAnimationFrame(requestRef);
-  }, [onGesture, onStatus, onPinchEnd, onPinchStart, debugMode]);
+  }, [onGesture, onStatus, onPinchStart, debugMode]);
 
   return (
     <>
@@ -759,10 +903,49 @@ export default function GrandTreeApp() {
   const [debugMode, setDebugMode] = useState(false);
   const [backgroundId, setBackgroundId] = useState<string>(DEFAULT_BACKGROUND_ID);
   const [isMobile, setIsMobile] = useState(() => (typeof window !== 'undefined' ? window.innerWidth <= 820 : false));
-  const [floatingPhoto, setFloatingPhoto] = useState<{ url: string; phase: 'grab' | 'release'; key: number; origin: { x: number; y: number } } | null>(null);
   const [isPlayingMusic, setIsPlayingMusic] = useState(false);
+  const [showCommentBox, setShowCommentBox] = useState(false);
+  const [floatingComment, setFloatingComment] = useState<{ comment: any; phase: 'show' | 'hide'; key: number; origin: { x: number; y: number } } | null>(null);
+  const [isAnimating, setIsAnimating] = useState(false); // 防止手势冲突
+  const [replyToComment, setReplyToComment] = useState<WalineComment | null>(null);
+  const [showAuthManager, setShowAuthManager] = useState(false);
+  // 用户认证状态（用于未来功能扩展，如显示当前用户）
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  const [userAuth, setUserAuth] = useState<{ nick: string; mail: string } | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
-  const ornamentsRef = useRef<PhotoOrnamentsHandle>(null);
+  const envelopesRef = useRef<EnvelopeOrnamentsHandle>(null);
+
+  // Waline 评论集成
+  const { comments, count: commentCount, getRandomComment, fetchComments } = useWalineComments();
+  const walineEnabled = isWalineConfigured();
+
+  // 恢复登录状态
+  useEffect(() => {
+    const savedAuth = localStorage.getItem('waline_auth');
+    if (savedAuth) {
+      try {
+        const auth = JSON.parse(savedAuth);
+        setUserAuth(auth);
+        console.log('已自动恢复登录状态:', auth.nick);
+      } catch {
+        localStorage.removeItem('waline_auth');
+      }
+    }
+  }, []);
+
+  // 调试信息
+  useEffect(() => {
+    console.log('=== Waline 配置检查 ===');
+    console.log('- 环境变量:', import.meta.env.VITE_WALINE_SERVER_URL);
+    console.log('- walineEnabled:', walineEnabled);
+    console.log('- commentCount:', commentCount);
+    console.log('- comments数组长度:', comments.length);
+    console.log('- comments数据:', comments);
+    console.log('- DENSITY_CONFIG.envelopes:', DENSITY_CONFIG.envelopes);
+    console.log('- 信封配置数量（固定显示）:', DENSITY_CONFIG.envelopes);
+    console.log('- 信封是否有评论关联:', comments.length > 0 ? `是 (${comments.length} 条)` : '否（显示占位符信封）');
+    console.log('- 当前登录用户:', userAuth?.nick || '未登录');
+  }, [walineEnabled, commentCount, comments, userAuth]);
 
   const photoUrls = useMemo(() => (photoAssets.length ? photoAssets : [FALLBACK_PHOTO]), [photoAssets]);
 
@@ -786,39 +969,6 @@ export default function GrandTreeApp() {
     const found = BACKGROUND_OPTIONS.find(opt => opt.id === backgroundId) || BACKGROUND_OPTIONS[0];
     return found;
   }, [backgroundId]);
-
-  const openPhoto = useCallback((payload: PhotoOpenPayload | null) => {
-    if (!payload) return;
-    setFloatingPhoto({
-      url: payload.url,
-      phase: 'grab',
-      key: Date.now(),
-      origin: payload.screenPosition
-    });
-  }, []);
-
-  const handlePinchStart = useCallback(() => {
-    const picked = ornamentsRef.current?.openRandomPhoto?.();
-    if (picked) {
-      openPhoto(picked);
-      return;
-    }
-    if (photoUrls.length) {
-      openPhoto({ url: photoUrls[Math.floor(Math.random() * photoUrls.length)], screenPosition: { x: window.innerWidth / 2, y: window.innerHeight / 2 } });
-    }
-  }, [openPhoto, photoUrls]);
-
-  const handlePinchEnd = useCallback(() => {
-    setFloatingPhoto((prev) => (prev ? { ...prev, phase: 'release' } : prev));
-  }, []);
-
-  const handlePhotoOpen = useCallback((payload: PhotoOpenPayload) => {
-    openPhoto(payload);
-  }, [openPhoto]);
-
-  const handlePhotoAnimationEnd = () => {
-    setFloatingPhoto((prev) => (prev && prev.phase === 'release' ? null : prev));
-  };
 
   const handleStarClick = useCallback(() => {
     if (!musicTracks.length) return;
@@ -844,6 +994,138 @@ export default function GrandTreeApp() {
 
     player.onended = () => setIsPlayingMusic(false);
   }, [musicTracks]);
+
+  // 随机抽取评论
+  const handleRandomComment = useCallback(() => {
+    // 防止动画期间重复操作
+    if (isAnimating) return;
+    
+    setIsAnimating(true);
+
+    // 如果配置为不显示其他人的祝福，则只显示自己的
+    if (!UI_CONFIG.showOthersBlessings) {
+      const savedAuth = localStorage.getItem('waline_auth');
+      if (savedAuth) {
+        try {
+          const auth = JSON.parse(savedAuth);
+          const myComments = comments.filter(c => c.mail === auth.mail);
+          if (myComments.length === 0) {
+            setIsAnimating(false);
+            alert('你还没有发送祝福，快来发送第一条吧！');
+            return;
+          }
+          const randomComment = myComments[Math.floor(Math.random() * myComments.length)];
+          setFloatingComment({
+            comment: randomComment,
+            phase: 'show',
+            key: Date.now(),
+            origin: { x: window.innerWidth / 2, y: window.innerHeight / 2 }
+          });
+          setTimeout(() => {
+            setFloatingComment(prev => prev ? { ...prev, phase: 'hide' } : null);
+          }, 5000);
+          setTimeout(() => setIsAnimating(false), 800);
+          return;
+        } catch {
+          setIsAnimating(false);
+          alert('请先登录后查看你的祝福');
+          return;
+        }
+      } else {
+        setIsAnimating(false);
+        alert('请先登录后查看你的祝福');
+        return;
+      }
+    }
+    
+    // 优先从树上的信封中抽取（带位置信息）
+    const picked = envelopesRef.current?.openRandomEnvelope?.();
+    if (picked) {
+      setFloatingComment({
+        comment: picked.comment,
+        phase: 'show',
+        key: Date.now(),
+        origin: picked.screenPosition
+      });
+      setTimeout(() => {
+        setFloatingComment(prev => prev ? { ...prev, phase: 'hide' } : null);
+      }, 5000);
+      // 动画结束后解除锁定
+      setTimeout(() => setIsAnimating(false), 800);
+      return;
+    }
+    // 降级方案：直接从评论列表随机选择
+    const randomComment = getRandomComment();
+    if (!randomComment) {
+      setIsAnimating(false);
+      alert('暂无评论，快来发送第一条祝福吧！');
+      return;
+    }
+    setFloatingComment({
+      comment: randomComment,
+      phase: 'show',
+      key: Date.now(),
+      origin: { x: window.innerWidth / 2, y: window.innerHeight / 2 }
+    });
+    setTimeout(() => {
+      setFloatingComment(prev => prev ? { ...prev, phase: 'hide' } : null);
+    }, 5000);
+    setTimeout(() => setIsAnimating(false), 800);
+  }, [getRandomComment, isAnimating, comments]);
+
+  const handlePinchStart = useCallback(() => {
+    // 捏合手势改为抽取祝福
+    handleRandomComment();
+  }, [handleRandomComment]);
+
+  // 评论框关闭后刷新评论
+  const handleCommentBoxClose = useCallback(() => {
+    setShowCommentBox(false);
+    setReplyToComment(null);
+  }, []);
+
+  const handleCommentSuccess = useCallback(() => {
+    fetchComments();
+  }, [fetchComments]);
+
+  const handleWriteComment = useCallback(() => {
+    // 检查是否已登录，如果已登录则更新状态
+    const savedAuth = localStorage.getItem('waline_auth');
+    if (savedAuth) {
+      try {
+        const auth = JSON.parse(savedAuth);
+        setUserAuth(auth);
+        console.log('已恢复登录状态:', auth.nick);
+      } catch {
+        // 忽略错误
+      }
+    }
+    setShowCommentBox(true);
+  }, []);
+
+  // 处理回复评论
+  const handleReplyToComment = useCallback((comment: WalineComment) => {
+    if (!FEATURE_FLAGS.enableCommentReply) return;
+    setReplyToComment(comment);
+    setShowCommentBox(true);
+    setFloatingComment(null);
+  }, []);
+
+  const handleCommentAnimationEnd = () => {
+    setFloatingComment(prev => (prev && prev.phase === 'hide' ? null : prev));
+  };
+
+  const handleEnvelopeOpen = useCallback((payload: EnvelopeOpenPayload) => {
+    setFloatingComment({
+      comment: payload.comment,
+      phase: 'show',
+      key: Date.now(),
+      origin: payload.screenPosition
+    });
+    setTimeout(() => {
+      setFloatingComment(prev => prev ? { ...prev, phase: 'hide' } : null);
+    }, 5000);
+  }, []);
 
   return (
     <div
@@ -889,8 +1171,9 @@ export default function GrandTreeApp() {
               sceneState={sceneState}
               photoUrls={photoUrls}
               onStarClick={handleStarClick}
-              onPhotoOpen={handlePhotoOpen}
-              ornamentsRef={ornamentsRef}
+              envelopesRef={envelopesRef}
+              comments={comments}
+              onEnvelopeOpen={handleEnvelopeOpen}
               fogColor={activeBackground.fogColor}
               isMobile={isMobile}
               counts={counts}
@@ -902,7 +1185,6 @@ export default function GrandTreeApp() {
         onGesture={setSceneState}
         onStatus={() => {}}
         onPinchStart={handlePinchStart}
-        onPinchEnd={handlePinchEnd}
         debugMode={debugMode}
       />
 
@@ -911,6 +1193,29 @@ export default function GrandTreeApp() {
       <div className="hud hud--chip" data-active={isPlayingMusic}>
         {isPlayingMusic ? '♫ 正在播放音乐' : '点亮星星播放音乐'}
       </div>
+
+      {/* 调试信息 */}
+      {debugMode && (
+        <div style={{ position: 'fixed', top: '60px', left: '10px', background: 'rgba(0,0,0,0.8)', color: 'white', padding: '10px', fontSize: '12px', zIndex: 1000, borderRadius: '8px', maxWidth: '300px' }}>
+          <div><strong>Waline 配置:</strong></div>
+          <div>ENV: {import.meta.env.VITE_WALINE_SERVER_URL || 'undefined'}</div>
+          <div>Enabled: {walineEnabled ? 'YES' : 'NO'}</div>
+          <div>Count: {commentCount}</div>
+          <div>评论数组长度: {comments.length}</div>
+          <div>信封密度配置: {DENSITY_CONFIG.envelopes}</div>
+          <div>实际信封数: {Math.min(DENSITY_CONFIG.envelopes, comments.length)}</div>
+          <div style={{ marginTop: '8px' }}><strong>功能开关:</strong></div>
+          <div>手势控制: {FEATURE_FLAGS.enableGestureControl ? '✅' : '❌'} ({import.meta.env.VITE_ENABLE_GESTURE_CONTROL})</div>
+          <div>评论回复: {FEATURE_FLAGS.enableCommentReply ? '✅' : '❌'} ({import.meta.env.VITE_ENABLE_COMMENT_REPLY})</div>
+          <div>评论列表: {FEATURE_FLAGS.showCommentList ? '✅' : '❌'} (强制false)</div>
+          <div style={{ marginTop: '8px' }}><strong>密度配置:</strong></div>
+          <div>树叶: {DENSITY_CONFIG.foliage}</div>
+          <div>照片: {DENSITY_CONFIG.photos}</div>
+          <div>信封: {DENSITY_CONFIG.envelopes}</div>
+          <div>元素: {DENSITY_CONFIG.elements}</div>
+          <div>彩灯: {DENSITY_CONFIG.lights}</div>
+        </div>
+      )}
 
       <div className="hud hud--controls">
         <div className="ui-select">
@@ -925,26 +1230,85 @@ export default function GrandTreeApp() {
             ))}
           </select>
         </div>
-        <button className={`ui-button ${debugMode ? 'ui-button--active' : ''}`} onClick={() => setDebugMode(!debugMode)}>
-           {debugMode ? '隐藏调试' : '显示调试'}
-        </button>
+        {UI_CONFIG.showDebugButton && (
+          <button className={`ui-button ${debugMode ? 'ui-button--active' : ''}`} onClick={() => setDebugMode(!debugMode)}>
+             {debugMode ? '隐藏调试' : '显示调试'}
+          </button>
+        )}
         <button className="ui-button ui-button--primary" onClick={() => setSceneState(s => s === 'CHAOS' ? 'FORMED' : 'CHAOS')}>
            {sceneState === 'CHAOS' ? '组装圣诞树' : '散开雪花'}
         </button>
+        {walineEnabled && (
+          <>
+            <button className="ui-button ui-button--comment" onClick={handleWriteComment} title="写圣诞祝福">
+              💌 写祝福
+            </button>
+            <button className="ui-button ui-button--random-comment" onClick={handleRandomComment} title="随机抽取祝福" disabled={commentCount === 0}>
+              🎄 抽祝福
+            </button>
+            <button className="ui-button ui-button--auth" onClick={() => setShowAuthManager(true)} title="登录查看我的祝福">
+              👤 我的
+            </button>
+          </>
+        )}
       </div>
 
-      {floatingPhoto && (
-        <div
-          key={floatingPhoto.key}
-          className={`floating-photo floating-photo--${floatingPhoto.phase}`}
-          style={{ ['--from-x' as string]: `${floatingPhoto.origin.x}px`, ['--from-y' as string]: `${floatingPhoto.origin.y}px` }}
-          onClick={() => setFloatingPhoto(prev => (prev ? { ...prev, phase: 'release' } : prev))}
-          onAnimationEnd={handlePhotoAnimationEnd}
-        >
-          <div className="floating-photo__card">
-            <img src={floatingPhoto.url} alt="随机照片" />
+      {floatingComment && (
+        <>
+          {/* 背景遮罩，点击关闭 */}
+          <div
+            className="floating-comment-overlay"
+            onClick={() => setFloatingComment(prev => (prev ? { ...prev, phase: 'hide' } : prev))}
+          />
+          <div
+            key={floatingComment.key}
+            className={`floating-comment floating-comment--${floatingComment.phase}`}
+            style={{ ['--from-x' as string]: `${floatingComment.origin.x}px`, ['--from-y' as string]: `${floatingComment.origin.y}px` }}
+            onAnimationEnd={handleCommentAnimationEnd}
+          >
+            <div className="floating-comment__card">
+              <div className="floating-comment__avatar">
+                {floatingComment.comment.avatar ? (
+                  <img src={floatingComment.comment.avatar} alt={floatingComment.comment.nick} />
+                ) : (
+                  <div className="floating-comment__avatar-placeholder">
+                    {floatingComment.comment.nick?.charAt(0).toUpperCase() || '🎄'}
+                  </div>
+                )}
+              </div>
+              <div className="floating-comment__content">
+                <div className="floating-comment__text" dangerouslySetInnerHTML={{ __html: floatingComment.comment.comment }} />
+                <div className="floating-comment__author">
+                  — {floatingComment.comment.nick}
+                  {UI_CONFIG.showSenderEmail && floatingComment.comment.mail && (
+                    <span style={{ fontSize: '0.85em', color: '#999', marginLeft: '8px' }}>
+                      ({floatingComment.comment.mail})
+                    </span>
+                  )}
+                </div>
+                {FEATURE_FLAGS.enableCommentReply && (
+                  <button 
+                    className="floating-comment__reply-btn"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleReplyToComment(floatingComment.comment);
+                    }}
+                  >
+                    💌 回复祝福
+                  </button>
+                )}
+              </div>
+            </div>
           </div>
-        </div>
+        </>
+      )}
+
+      {showAuthManager && (
+        <AuthManager onClose={() => setShowAuthManager(false)} />
+      )}
+
+      {showCommentBox && walineEnabled && (
+        <WalineCommentBox onClose={handleCommentBoxClose} onSuccess={handleCommentSuccess} replyTo={replyToComment} />
       )}
     </div>
   );
