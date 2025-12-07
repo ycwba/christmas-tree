@@ -1,5 +1,6 @@
-import { useState, useMemo, useRef, useEffect, Suspense } from 'react';
-import { Canvas, useFrame, extend } from '@react-three/fiber';
+import { useState, useMemo, useRef, useEffect, Suspense, useCallback, useImperativeHandle, forwardRef } from 'react';
+import type React from 'react';
+import { Canvas, useFrame, extend, useThree } from '@react-three/fiber';
 import {
   OrbitControls,
   Environment,
@@ -10,19 +11,16 @@ import {
   Sparkles,
   useTexture
 } from '@react-three/drei';
-import { EffectComposer, Bloom, Vignette } from '@react-three/postprocessing';
+import { EffectComposer, Bloom } from '@react-three/postprocessing';
 import * as THREE from 'three';
 import { MathUtils } from 'three';
 import * as random from 'maath/random';
 import { GestureRecognizer, FilesetResolver, DrawingUtils } from "@mediapipe/tasks-vision";
+import { photos as photoAssets } from 'virtual:photos';
+import { musicTracks } from 'virtual:music';
+import './App.css';
 
-// --- 动态生成照片列表 (top.jpg + 1.jpg 到 31.jpg) ---
-const TOTAL_NUMBERED_PHOTOS = 31;
-// 修改：将 top.jpg 加入到数组开头
-const bodyPhotoPaths = [
-  '/photos/top.jpg',
-  ...Array.from({ length: TOTAL_NUMBERED_PHOTOS }, (_, i) => `/photos/${i + 1}.jpg`)
-];
+const FALLBACK_PHOTO = 'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" fill="none"><rect width="512" height="512" rx="28" fill="%23004225"/><circle cx="256" cy="180" r="90" fill="%23FFD700"/><text x="50%" y="78%" dominant-baseline="middle" text-anchor="middle" fill="white" font-size="64" font-family="sans-serif">&#127876;</text></svg>';
 
 // --- 视觉配置 ---
 const CONFIG = {
@@ -34,7 +32,7 @@ const CONFIG = {
     green: '#2E7D32',
     white: '#FFFFFF',   // 纯白色
     warmLight: '#FFD54F',
-    lights: ['#FF0000', '#00FF00', '#0000FF', '#FFFF00'], // 彩灯
+    lights: ['#ff7bac', '#7de0ff', '#ffd86f', '#8cffc1', '#ff9f7a'], // 糖果色彩灯
     // 拍立得边框颜色池 (复古柔和色系)
     borders: ['#FFFAF0', '#F0E68C', '#E6E6FA', '#FFB6C1', '#98FB98', '#87CEFA', '#FFDAB9'],
     // 圣诞元素颜色
@@ -47,12 +45,87 @@ const CONFIG = {
     elements: 200,    // 圣诞元素数量
     lights: 400       // 彩灯数量
   },
-  tree: { height: 22, radius: 9 }, // 树体尺寸
-  photos: {
-    // top 属性不再需要，因为已经移入 body
-    body: bodyPhotoPaths
-  }
+  tree: { height: 22, radius: 9 } // 树体尺寸
 };
+
+type BackgroundOption = {
+  id: string;
+  label: string;
+  kind: 'preset' | 'image' | 'video';
+  base: string;
+  overlay: string;
+  stars: string;
+  sceneBg: string;
+  fogColor: string;
+  textColor: string;
+  mediaUrl?: string;
+};
+
+const PRESET_BACKGROUNDS: BackgroundOption[] = [
+  {
+    id: 'preset-sky',
+    label: '柔和蓝',
+    kind: 'preset',
+    base: 'linear-gradient(180deg, #e4f5ff 0%, #cfe9ff 45%, #b7d9ff 100%)',
+    overlay: 'radial-gradient(circle at 25% 35%, rgba(255, 168, 194, 0.16), transparent 32%), radial-gradient(circle at 75% 28%, rgba(255, 237, 173, 0.18), transparent 32%), radial-gradient(circle at 55% 70%, rgba(174, 230, 255, 0.18), transparent 36%)',
+    stars: 'radial-gradient(2px 2px at 10% 20%, rgba(255,255,255,0.35), transparent), radial-gradient(2px 2px at 30% 80%, rgba(255,255,255,0.32), transparent), radial-gradient(2px 2px at 70% 50%, rgba(255,255,255,0.28), transparent), radial-gradient(3px 3px at 85% 30%, rgba(255,255,255,0.2), transparent)',
+    sceneBg: '#cfe9ff',
+    fogColor: '#b7d9ff',
+    textColor: '#0f1b29'
+  },
+  {
+    id: 'preset-blush',
+    label: '晨曦粉',
+    kind: 'preset',
+    base: 'linear-gradient(180deg, #ffe9f3 0%, #ffdbe9 45%, #ffd0df 100%)',
+    overlay: 'radial-gradient(circle at 20% 35%, rgba(255, 193, 214, 0.2), transparent 32%), radial-gradient(circle at 78% 26%, rgba(255, 230, 180, 0.22), transparent 34%), radial-gradient(circle at 60% 72%, rgba(210, 235, 255, 0.16), transparent 36%)',
+    stars: 'radial-gradient(2px 2px at 12% 24%, rgba(255,255,255,0.35), transparent), radial-gradient(2px 2px at 32% 78%, rgba(255,255,255,0.3), transparent), radial-gradient(2px 2px at 70% 52%, rgba(255,255,255,0.26), transparent), radial-gradient(3px 3px at 85% 30%, rgba(255,255,255,0.18), transparent)',
+    sceneBg: '#ffe6f2',
+    fogColor: '#ffd6e5',
+    textColor: '#3a1b25'
+  },
+  {
+    id: 'preset-mist',
+    label: '雾白',
+    kind: 'preset',
+    base: 'linear-gradient(180deg, #f9fbff 0%, #e7f0f8 45%, #dbe6f1 100%)',
+    overlay: 'radial-gradient(circle at 22% 34%, rgba(200, 221, 255, 0.18), transparent 32%), radial-gradient(circle at 76% 28%, rgba(240, 228, 200, 0.16), transparent 34%), radial-gradient(circle at 55% 70%, rgba(205, 225, 240, 0.16), transparent 36%)',
+    stars: 'radial-gradient(2px 2px at 10% 20%, rgba(255,255,255,0.28), transparent), radial-gradient(2px 2px at 30% 80%, rgba(255,255,255,0.26), transparent), radial-gradient(2px 2px at 70% 50%, rgba(255,255,255,0.22), transparent), radial-gradient(3px 3px at 85% 30%, rgba(255,255,255,0.16), transparent)',
+    sceneBg: '#e7f0f8',
+    fogColor: '#d6e3ef',
+    textColor: '#0f1b29'
+  }
+];
+
+const BACKGROUND_ASSET_IMPORTS = import.meta.glob('../public/background/**/*.{png,jpg,jpeg,webp,avif,gif,mp4,webm,ogg}', { eager: true, as: 'url' }) as Record<string, string>;
+
+const ASSET_BACKGROUNDS: BackgroundOption[] = Object.entries(BACKGROUND_ASSET_IMPORTS).map(([path, url], idx) => {
+  const file = path.split('/').pop() || `asset-${idx}`;
+  const label = decodeURIComponent(file.replace(/\.[^.]+$/, ''));
+  const ext = (file.split('.').pop() || '').toLowerCase();
+  const isVideo = ['mp4', 'webm', 'ogg'].includes(ext);
+  const fallback = PRESET_BACKGROUNDS[0];
+  return {
+    id: `asset-${idx}-${file}`,
+    label,
+    kind: (isVideo ? 'video' : 'image') as 'video' | 'image',
+    mediaUrl: url,
+    base: isVideo ? fallback.base : `url("${url}") center/cover no-repeat, ${fallback.base}`,
+    overlay: fallback.overlay,
+    stars: fallback.stars,
+    sceneBg: fallback.sceneBg,
+    fogColor: fallback.fogColor,
+    textColor: fallback.textColor
+  };
+}).sort((a, b) => a.label.localeCompare(b.label));
+
+const BACKGROUND_OPTIONS: BackgroundOption[] = ASSET_BACKGROUNDS.length ? [...ASSET_BACKGROUNDS, ...PRESET_BACKGROUNDS] : PRESET_BACKGROUNDS;
+
+const DEFAULT_BACKGROUND_ID = (() => {
+  if (ASSET_BACKGROUNDS.length) return BACKGROUND_OPTIONS[0].id;
+  const blush = BACKGROUND_OPTIONS.find(b => b.id === 'preset-blush');
+  return blush?.id ?? BACKGROUND_OPTIONS[0].id;
+})();
 
 // --- Shader Material (Foliage) ---
 const FoliageMaterial = shaderMaterial(
@@ -123,14 +196,31 @@ const Foliage = ({ state }: { state: 'CHAOS' | 'FORMED' }) => {
   );
 };
 
+type PhotoOpenPayload = { url: string; screenPosition: { x: number; y: number } };
+type PhotoOrnamentsHandle = { openRandomPhoto: () => PhotoOpenPayload | null };
+type PhotoOrnamentsProps = { state: 'CHAOS' | 'FORMED', photoUrls: string[], onPhotoOpen?: (p: PhotoOpenPayload) => void };
+
 // --- Component: Photo Ornaments (Double-Sided Polaroid) ---
-const PhotoOrnaments = ({ state }: { state: 'CHAOS' | 'FORMED' }) => {
-  const textures = useTexture(CONFIG.photos.body);
+const PhotoOrnaments = forwardRef(function PhotoOrnamentsComponent(
+  props: PhotoOrnamentsProps,
+  ref: React.ForwardedRef<PhotoOrnamentsHandle>
+) {
+  const { state, photoUrls, onPhotoOpen } = props;
+  const textures = useTexture(photoUrls);
   const count = CONFIG.counts.ornaments;
   const groupRef = useRef<THREE.Group>(null);
+  const { size, camera } = useThree();
 
   const borderGeometry = useMemo(() => new THREE.PlaneGeometry(1.2, 1.5), []);
   const photoGeometry = useMemo(() => new THREE.PlaneGeometry(1, 1), []);
+
+  const projectToScreen = useCallback((pos: THREE.Vector3) => {
+    const projected = pos.clone().project(camera);
+    return {
+      x: (projected.x * 0.5 + 0.5) * size.width,
+      y: (-projected.y * 0.5 + 0.5) * size.height
+    };
+  }, [camera, size.height, size.width]);
 
   const data = useMemo(() => {
     return new Array(count).fill(0).map((_, i) => {
@@ -195,10 +285,41 @@ const PhotoOrnaments = ({ state }: { state: 'CHAOS' | 'FORMED' }) => {
     });
   });
 
+  const openFromGroup = useCallback((group: THREE.Object3D, textureIndex: number) => {
+    const worldPos = new THREE.Vector3();
+    group.getWorldPosition(worldPos);
+    const screenPosition = projectToScreen(worldPos);
+    const url = photoUrls[textureIndex % photoUrls.length] || FALLBACK_PHOTO;
+    onPhotoOpen?.({ url, screenPosition });
+  }, [photoUrls, projectToScreen, onPhotoOpen]);
+
+  useImperativeHandle(ref, () => ({
+    openRandomPhoto: () => {
+      if (!groupRef.current || !groupRef.current.children.length) return null;
+      const child = groupRef.current.children[Math.floor(Math.random() * groupRef.current.children.length)];
+      const texIndex = (child as any).userData?.textureIndex ?? 0;
+      const worldPos = new THREE.Vector3();
+      child.getWorldPosition(worldPos);
+      return {
+        url: photoUrls[texIndex % photoUrls.length] || FALLBACK_PHOTO,
+        screenPosition: projectToScreen(worldPos)
+      };
+    }
+  }), [photoUrls, projectToScreen]);
+
   return (
     <group ref={groupRef}>
       {data.map((obj, i) => (
-        <group key={i} scale={[obj.scale, obj.scale, obj.scale]} rotation={state === 'CHAOS' ? obj.chaosRotation : [0,0,0]}>
+        <group
+          key={i}
+          scale={[obj.scale, obj.scale, obj.scale]}
+          rotation={state === 'CHAOS' ? obj.chaosRotation : [0,0,0]}
+          userData={{ textureIndex: obj.textureIndex }}
+          onPointerDown={(e) => {
+            e.stopPropagation();
+            openFromGroup(e.object, obj.textureIndex);
+          }}
+        >
           {/* 正面 */}
           <group position={[0, 0, 0.015]}>
             <mesh geometry={photoGeometry}>
@@ -231,7 +352,7 @@ const PhotoOrnaments = ({ state }: { state: 'CHAOS' | 'FORMED' }) => {
       ))}
     </group>
   );
-};
+});
 
 // --- Component: Christmas Elements ---
 const ChristmasElements = ({ state }: { state: 'CHAOS' | 'FORMED' }) => {
@@ -288,6 +409,15 @@ const ChristmasElements = ({ state }: { state: 'CHAOS' | 'FORMED' }) => {
   );
 };
 
+const Trunk = () => {
+  const geometry = useMemo(() => new THREE.CylinderGeometry(1.4, 1.6, 6, 12), []);
+  return (
+    <mesh position={[0, -(CONFIG.tree.height / 2) - 3, 0]} geometry={geometry} receiveShadow castShadow>
+      <meshStandardMaterial color="#8b5a2b" roughness={0.85} metalness={0.1} />
+    </mesh>
+  );
+};
+
 // --- Component: Fairy Lights ---
 const FairyLights = ({ state }: { state: 'CHAOS' | 'FORMED' }) => {
   const count = CONFIG.counts.lights;
@@ -331,7 +461,7 @@ const FairyLights = ({ state }: { state: 'CHAOS' | 'FORMED' }) => {
 };
 
 // --- Component: Top Star (No Photo, Pure Gold 3D Star) ---
-const TopStar = ({ state }: { state: 'CHAOS' | 'FORMED' }) => {
+const TopStar = ({ state, onClick }: { state: 'CHAOS' | 'FORMED', onClick: () => void }) => {
   const groupRef = useRef<THREE.Group>(null);
 
   const starShape = useMemo(() => {
@@ -373,14 +503,21 @@ const TopStar = ({ state }: { state: 'CHAOS' | 'FORMED' }) => {
   return (
     <group ref={groupRef} position={[0, CONFIG.tree.height / 2 + 1.8, 0]}>
       <Float speed={2} rotationIntensity={0.2} floatIntensity={0.2}>
-        <mesh geometry={starGeometry} material={goldMaterial} />
+        <mesh
+          geometry={starGeometry}
+          material={goldMaterial}
+          onPointerDown={(e) => {
+            e.stopPropagation();
+            onClick();
+          }}
+        />
       </Float>
     </group>
   );
 };
 
 // --- Main Scene Experience ---
-const Experience = ({ sceneState, rotationSpeed }: { sceneState: 'CHAOS' | 'FORMED', rotationSpeed: number }) => {
+const Experience = ({ sceneState, rotationSpeed, photoUrls, onStarClick, onPhotoOpen, ornamentsRef, fogColor }: { sceneState: 'CHAOS' | 'FORMED', rotationSpeed: number, photoUrls: string[], onStarClick: () => void, onPhotoOpen: (p: PhotoOpenPayload) => void, ornamentsRef: React.RefObject<PhotoOrnamentsHandle>, fogColor: string }) => {
   const controlsRef = useRef<any>(null);
   useFrame(() => {
     if (controlsRef.current) {
@@ -392,31 +529,43 @@ const Experience = ({ sceneState, rotationSpeed }: { sceneState: 'CHAOS' | 'FORM
   return (
     <>
       <PerspectiveCamera makeDefault position={[0, 8, 60]} fov={45} />
-      <OrbitControls ref={controlsRef} enablePan={false} enableZoom={true} minDistance={30} maxDistance={120} autoRotate={rotationSpeed === 0 && sceneState === 'FORMED'} autoRotateSpeed={0.3} maxPolarAngle={Math.PI / 1.7} />
+      <OrbitControls
+        ref={controlsRef}
+        enablePan={false}
+        enableZoom={true}
+        enableDamping
+        dampingFactor={0.08}
+        minDistance={30}
+        maxDistance={120}
+        autoRotate={rotationSpeed === 0 && sceneState === 'FORMED'}
+        autoRotateSpeed={0.3}
+        maxPolarAngle={Math.PI / 1.7}
+      />
 
-      <color attach="background" args={['#000300']} />
+      <fog attach="fog" args={[fogColor, 40, 140]} />
       <Stars radius={100} depth={50} count={5000} factor={4} saturation={0} fade speed={1} />
       <Environment preset="night" background={false} />
+      <Sparkles count={800} scale={[120, 120, 120]} size={2} speed={0.18} opacity={0.12} color="#cfe9ff" />
 
       <ambientLight intensity={0.4} color="#003311" />
       <pointLight position={[30, 30, 30]} intensity={100} color={CONFIG.colors.warmLight} />
       <pointLight position={[-30, 10, -30]} intensity={50} color={CONFIG.colors.gold} />
       <pointLight position={[0, -20, 10]} intensity={30} color="#ffffff" />
 
-      <group position={[0, -6, 0]}>
+      <group position={[0, 2, 0]}>
+        {sceneState === 'FORMED' && <Trunk />}
         <Foliage state={sceneState} />
         <Suspense fallback={null}>
-           <PhotoOrnaments state={sceneState} />
+          <PhotoOrnaments ref={ornamentsRef} state={sceneState} photoUrls={photoUrls} onPhotoOpen={onPhotoOpen} />
            <ChristmasElements state={sceneState} />
            <FairyLights state={sceneState} />
-           <TopStar state={sceneState} />
+            <TopStar state={sceneState} onClick={onStarClick} />
         </Suspense>
         <Sparkles count={600} scale={50} size={8} speed={0.4} opacity={0.4} color={CONFIG.colors.silver} />
       </group>
 
       <EffectComposer>
         <Bloom luminanceThreshold={0.8} luminanceSmoothing={0.1} intensity={1.5} radius={0.5} mipmapBlur />
-        <Vignette eskil={false} offset={0.1} darkness={1.2} />
       </EffectComposer>
     </>
   );
@@ -424,9 +573,11 @@ const Experience = ({ sceneState, rotationSpeed }: { sceneState: 'CHAOS' | 'FORM
 
 // --- Gesture Controller ---
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-const GestureController = ({ onGesture, onMove, onStatus, debugMode }: any) => {
+const GestureController = ({ onGesture, onMove, onStatus, onPinchStart, onPinchEnd, debugMode }: any) => {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const pinchActiveRef = useRef(false);
+  const pinchBlockUntilRef = useRef(0);
 
   useEffect(() => {
     let gestureRecognizer: GestureRecognizer;
@@ -476,24 +627,65 @@ const GestureController = ({ onGesture, onMove, onStatus, debugMode }: any) => {
                 }
             } else if (ctx && !debugMode) ctx.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
 
+            let isPinching = false;
+            let isGesturing = false;
+
+            // 优先识别握拳/张手手势
             if (results.gestures.length > 0) {
-              const name = results.gestures[0][0].categoryName; const score = results.gestures[0][0].score;
-              if (score > 0.4) {
-                 if (name === "Open_Palm") onGesture("CHAOS"); if (name === "Closed_Fist") onGesture("FORMED");
-                 if (debugMode) onStatus(`DETECTED: ${name}`);
+              const name = results.gestures[0][0].categoryName;
+              const score = results.gestures[0][0].score;
+              if (score > 0.4 && (name === "Open_Palm" || name === "Closed_Fist")) {
+                isGesturing = true;
+                if (name === "Open_Palm") onGesture("CHAOS");
+                if (name === "Closed_Fist") {
+                  onGesture("FORMED");
+                  pinchBlockUntilRef.current = Date.now() + 700; // 握拳后短暂屏蔽捏合
+                }
+                if (debugMode) onStatus(`DETECTED: ${name}`);
               }
-              if (results.landmarks.length > 0) {
-                const speed = (0.5 - results.landmarks[0][0].x) * 0.15;
-                onMove(Math.abs(speed) > 0.01 ? speed : 0);
+            }
+
+            if (results.landmarks.length > 0) {
+              const hand = results.landmarks[0];
+              const speed = (0.5 - hand[0].x) * 0.15;
+              onMove(Math.abs(speed) > 0.01 ? speed : 0);
+
+              const pinchBlocked = Date.now() < pinchBlockUntilRef.current;
+
+              // 只在没有握拳/张手手势且不在屏蔽期时才允许捏合
+              if (!isGesturing && !pinchBlocked) {
+                const thumbTip = hand[4];
+                const indexTip = hand[8];
+                const wrist = hand[0];
+                const indexMcp = hand[5];
+                const palmSpan = Math.hypot(indexMcp.x - wrist.x, indexMcp.y - wrist.y) || 1;
+                const pinchDistance = Math.hypot(thumbTip.x - indexTip.x, thumbTip.y - indexTip.y);
+                isPinching = pinchDistance < Math.max(0.02, palmSpan * 0.4);
+
+                if (isPinching && !pinchActiveRef.current) {
+                  pinchActiveRef.current = true;
+                  if (onPinchStart) onPinchStart();
+                  if (debugMode) onStatus("PINCH: PHOTO MODE");
+                } else if (!isPinching && pinchActiveRef.current) {
+                  pinchActiveRef.current = false;
+                  if (onPinchEnd) onPinchEnd();
+                }
+              } else if (pinchActiveRef.current) {
+                // 如果在捏合状态但检测到手势或屏蔽期，强制结束捏合
+                pinchActiveRef.current = false;
+                if (onPinchEnd) onPinchEnd();
               }
-            } else { onMove(0); if (debugMode) onStatus("AI READY: NO HAND"); }
+            } else { 
+              onMove(0); 
+              if (debugMode) onStatus("AI READY: NO HAND"); 
+            }
         }
         requestRef = requestAnimationFrame(predictWebcam);
       }
     };
     setup();
     return () => cancelAnimationFrame(requestRef);
-  }, [onGesture, onMove, onStatus, debugMode]);
+  }, [onGesture, onMove, onStatus, onPinchEnd, onPinchStart, debugMode]);
 
   return (
     <>
@@ -509,46 +701,158 @@ export default function GrandTreeApp() {
   const [rotationSpeed, setRotationSpeed] = useState(0);
   const [aiStatus, setAiStatus] = useState("INITIALIZING...");
   const [debugMode, setDebugMode] = useState(false);
+  const [backgroundId, setBackgroundId] = useState<string>(DEFAULT_BACKGROUND_ID);
+  const [floatingPhoto, setFloatingPhoto] = useState<{ url: string; phase: 'grab' | 'release'; key: number; origin: { x: number; y: number } } | null>(null);
+  const [isPlayingMusic, setIsPlayingMusic] = useState(false);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const ornamentsRef = useRef<PhotoOrnamentsHandle>(null);
+
+  const photoUrls = useMemo(() => (photoAssets.length ? photoAssets : [FALLBACK_PHOTO]), [photoAssets]);
+
+  const activeBackground = useMemo(() => {
+    const found = BACKGROUND_OPTIONS.find(opt => opt.id === backgroundId) || BACKGROUND_OPTIONS[0];
+    return found;
+  }, [backgroundId]);
+
+  const openPhoto = useCallback((payload: PhotoOpenPayload | null) => {
+    if (!payload) return;
+    setFloatingPhoto({
+      url: payload.url,
+      phase: 'grab',
+      key: Date.now(),
+      origin: payload.screenPosition
+    });
+  }, []);
+
+  const handlePinchStart = useCallback(() => {
+    const picked = ornamentsRef.current?.openRandomPhoto?.();
+    if (picked) {
+      openPhoto(picked);
+      return;
+    }
+    if (photoUrls.length) {
+      openPhoto({ url: photoUrls[Math.floor(Math.random() * photoUrls.length)], screenPosition: { x: window.innerWidth / 2, y: window.innerHeight / 2 } });
+    }
+  }, [openPhoto, photoUrls]);
+
+  const handlePinchEnd = useCallback(() => {
+    setFloatingPhoto((prev) => (prev ? { ...prev, phase: 'release' } : prev));
+  }, []);
+
+  const handlePhotoOpen = useCallback((payload: PhotoOpenPayload) => {
+    openPhoto(payload);
+  }, [openPhoto]);
+
+  const handlePhotoAnimationEnd = () => {
+    setFloatingPhoto((prev) => (prev && prev.phase === 'release' ? null : prev));
+  };
+
+  const handleStarClick = useCallback(() => {
+    if (!musicTracks.length) {
+      setAiStatus('未找到音乐文件');
+      return;
+    }
+
+    if (!audioRef.current) {
+      const pick = musicTracks[Math.floor(Math.random() * musicTracks.length)];
+      audioRef.current = new Audio(pick);
+      audioRef.current.volume = 0.7;
+    }
+
+    const player = audioRef.current;
+    if (!player) return;
+
+    if (player.paused) {
+      // 继续播放 / 重新播放
+      if (player.ended) player.currentTime = 0;
+      player.play().then(() => setIsPlayingMusic(true)).catch(() => setAiStatus('音乐播放需要浏览器授权'));
+    } else {
+      // 暂停
+      player.pause();
+      setIsPlayingMusic(false);
+    }
+
+    player.onended = () => setIsPlayingMusic(false);
+  }, [musicTracks]);
 
   return (
-    <div style={{ width: '100vw', height: '100vh', backgroundColor: '#000', position: 'relative', overflow: 'hidden' }}>
-      <div style={{ width: '100%', height: '100%', position: 'absolute', top: 0, left: 0, zIndex: 1 }}>
-        <Canvas dpr={[1, 2]} gl={{ toneMapping: THREE.ReinhardToneMapping }} shadows>
-            <Experience sceneState={sceneState} rotationSpeed={rotationSpeed} />
+    <div
+      className="app-shell"
+      style={{
+        ['--bg-base' as string]: activeBackground.base,
+        ['--bg-overlay' as string]: activeBackground.overlay,
+        ['--bg-stars' as string]: activeBackground.stars,
+        ['--text-color' as string]: activeBackground.textColor
+      }}
+    >
+      {activeBackground.kind === 'video' && activeBackground.mediaUrl && (
+        <video className="bg-media" src={activeBackground.mediaUrl} autoPlay loop muted playsInline />
+      )}
+      <div className="canvas-wrap">
+        <Canvas dpr={[1, 2]} gl={{ toneMapping: THREE.ReinhardToneMapping, alpha: true }} shadows>
+            <Experience
+              sceneState={sceneState}
+              rotationSpeed={rotationSpeed}
+              photoUrls={photoUrls}
+              onStarClick={handleStarClick}
+              onPhotoOpen={handlePhotoOpen}
+              ornamentsRef={ornamentsRef}
+              fogColor={activeBackground.fogColor}
+            />
         </Canvas>
       </div>
-      <GestureController onGesture={setSceneState} onMove={setRotationSpeed} onStatus={setAiStatus} debugMode={debugMode} />
 
-      {/* UI - Stats */}
-      <div style={{ position: 'absolute', bottom: '30px', left: '40px', color: '#888', zIndex: 10, fontFamily: 'sans-serif', userSelect: 'none' }}>
-        <div style={{ marginBottom: '15px' }}>
-          <p style={{ fontSize: '10px', letterSpacing: '2px', textTransform: 'uppercase', marginBottom: '4px' }}>Memories</p>
-          <p style={{ fontSize: '24px', color: '#FFD700', fontWeight: 'bold', margin: 0 }}>
-            {CONFIG.counts.ornaments.toLocaleString()} <span style={{ fontSize: '10px', color: '#555', fontWeight: 'normal' }}>POLAROIDS</span>
-          </p>
-        </div>
-        <div>
-          <p style={{ fontSize: '10px', letterSpacing: '2px', textTransform: 'uppercase', marginBottom: '4px' }}>Foliage</p>
-          <p style={{ fontSize: '24px', color: '#004225', fontWeight: 'bold', margin: 0 }}>
-            {(CONFIG.counts.foliage / 1000).toFixed(0)}K <span style={{ fontSize: '10px', color: '#555', fontWeight: 'normal' }}>EMERALD NEEDLES</span>
-          </p>
-        </div>
-      </div>
+      <GestureController
+        onGesture={setSceneState}
+        onMove={setRotationSpeed}
+        onStatus={setAiStatus}
+        onPinchStart={handlePinchStart}
+        onPinchEnd={handlePinchEnd}
+        debugMode={debugMode}
+      />
 
-      {/* UI - Buttons */}
-      <div style={{ position: 'absolute', bottom: '30px', right: '40px', zIndex: 10, display: 'flex', gap: '10px' }}>
-        <button onClick={() => setDebugMode(!debugMode)} style={{ padding: '12px 15px', backgroundColor: debugMode ? '#FFD700' : 'rgba(0,0,0,0.5)', border: '1px solid #FFD700', color: debugMode ? '#000' : '#FFD700', fontFamily: 'sans-serif', fontSize: '12px', fontWeight: 'bold', cursor: 'pointer', backdropFilter: 'blur(4px)' }}>
-           {debugMode ? 'HIDE DEBUG' : '🛠 DEBUG'}
-        </button>
-        <button onClick={() => setSceneState(s => s === 'CHAOS' ? 'FORMED' : 'CHAOS')} style={{ padding: '12px 30px', backgroundColor: 'rgba(0,0,0,0.5)', border: '1px solid rgba(255, 215, 0, 0.5)', color: '#FFD700', fontFamily: 'serif', fontSize: '14px', fontWeight: 'bold', letterSpacing: '3px', textTransform: 'uppercase', cursor: 'pointer', backdropFilter: 'blur(4px)' }}>
-           {sceneState === 'CHAOS' ? 'Assemble Tree' : 'Disperse'}
-        </button>
-      </div>
-
-      {/* UI - AI Status */}
-      <div style={{ position: 'absolute', top: '20px', left: '50%', transform: 'translateX(-50%)', color: aiStatus.includes('ERROR') ? '#FF0000' : 'rgba(255, 215, 0, 0.4)', fontSize: '10px', letterSpacing: '2px', zIndex: 10, background: 'rgba(0,0,0,0.5)', padding: '4px 8px', borderRadius: '4px' }}>
+      <div className="hud hud--status" data-error={aiStatus.includes('ERROR')}>
         {aiStatus}
       </div>
+
+      <div className="hud hud--chip" data-active={isPlayingMusic}>
+        {isPlayingMusic ? '♫ 正在播放音乐' : '点亮星星播放音乐'}
+      </div>
+
+      <div className="hud hud--controls">
+        <div className="ui-select">
+          <label htmlFor="bg-select">背景</label>
+          <select
+            id="bg-select"
+            value={backgroundId}
+            onChange={(e) => setBackgroundId(e.target.value)}
+          >
+            {BACKGROUND_OPTIONS.map((opt) => (
+              <option key={opt.id} value={opt.id}>{opt.label}{opt.kind === 'video' ? ' (视频)' : ''}</option>
+            ))}
+          </select>
+        </div>
+        <button className={`ui-button ${debugMode ? 'ui-button--active' : ''}`} onClick={() => setDebugMode(!debugMode)}>
+           {debugMode ? '隐藏调试' : '显示调试'}
+        </button>
+        <button className="ui-button ui-button--primary" onClick={() => setSceneState(s => s === 'CHAOS' ? 'FORMED' : 'CHAOS')}>
+           {sceneState === 'CHAOS' ? '组装圣诞树' : '散开雪花'}
+        </button>
+      </div>
+
+      {floatingPhoto && (
+        <div
+          key={floatingPhoto.key}
+          className={`floating-photo floating-photo--${floatingPhoto.phase}`}
+          style={{ ['--from-x' as string]: `${floatingPhoto.origin.x}px`, ['--from-y' as string]: `${floatingPhoto.origin.y}px` }}
+          onClick={() => setFloatingPhoto(prev => (prev ? { ...prev, phase: 'release' } : prev))}
+          onAnimationEnd={handlePhotoAnimationEnd}
+        >
+          <div className="floating-photo__card">
+            <img src={floatingPhoto.url} alt="随机照片" />
+          </div>
+        </div>
+      )}
     </div>
   );
 }
