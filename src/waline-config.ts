@@ -10,9 +10,11 @@ export const WALINE_CONFIG = {
 } as const;
 
 // 功能开关配置
+const isTrue = (val: string | undefined) => val?.trim() === 'true';
+
 export const FEATURE_FLAGS = {
-  enableGestureControl: import.meta.env.VITE_ENABLE_GESTURE_CONTROL === 'true', // 显式设为 true 才启用
-  enableCommentReply: import.meta.env.VITE_ENABLE_COMMENT_REPLY === 'true', // 显式设为 true 才启用
+  enableGestureControl: isTrue(import.meta.env.VITE_ENABLE_GESTURE_CONTROL), // 显式设为 true 才启用
+  enableCommentReply: isTrue(import.meta.env.VITE_ENABLE_COMMENT_REPLY), // 显式设为 true 才启用
   showCommentList: false, // 强制不显示评论列表
 };
 
@@ -23,7 +25,7 @@ const parseNumber = (value: string | undefined, defaultValue: number): number =>
 };
 
 export const DENSITY_CONFIG = {
-  foliage: parseNumber(import.meta.env.VITE_FOLIAGE_DENSITY, 20000),
+  foliage: parseNumber(import.meta.env.VITE_FOLIAGE_DENSITY, 30000), // 增加树叶密度
   photos: parseNumber(import.meta.env.VITE_PHOTO_DENSITY, 160),
   envelopes: parseNumber(import.meta.env.VITE_ENVELOPE_DENSITY, 50),
   elements: parseNumber(import.meta.env.VITE_ELEMENT_DENSITY, 180),

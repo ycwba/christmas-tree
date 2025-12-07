@@ -15,13 +15,13 @@ import { EffectComposer, Bloom } from '@react-three/postprocessing';
 import * as THREE from 'three';
 import { MathUtils } from 'three';
 import * as random from 'maath/random';
-import { GestureRecognizer, FilesetResolver, DrawingUtils } from "@mediapipe/tasks-vision";
 import { photos as photoAssets } from 'virtual:photos';
 import { musicTracks } from 'virtual:music';
 import { WalineCommentBox, useWalineComments } from './WalineIntegration';
 import type { WalineComment } from './WalineIntegration';
 import { AuthManager } from './AuthManager';
 import { isWalineConfigured, FEATURE_FLAGS, DENSITY_CONFIG, UI_CONFIG } from './waline-config';
+import { GestureController } from './GestureController';
 import './App.css';
 
 const FALLBACK_PHOTO = 'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" fill="none"><rect width="512" height="512" rx="28" fill="%23004225"/><circle cx="256" cy="180" r="90" fill="%23FFD700"/><text x="50%" y="78%" dominant-baseline="middle" text-anchor="middle" fill="white" font-size="64" font-family="sans-serif">&#127876;</text></svg>';
@@ -131,12 +131,19 @@ const DEFAULT_BACKGROUND_ID = (() => {
   return blush?.id ?? BACKGROUND_OPTIONS[0].id;
 })();
 
-// --- Optimized Foliage Shader (GPU-driven) ---
+// --- Advanced Foliage Shader with Specularity and Depth (参考1.html的高级光影) ---
 const FoliageMaterial = shaderMaterial(
-  { uTime: 0, uColor: new THREE.Color(CONFIG.colors.emerald), uProgress: 0, sizeMultiplier: 1 },
+  { 
+    uTime: 0, 
+    uColor: new THREE.Color(CONFIG.colors.emerald), 
+    uProgress: 0, 
+    sizeMultiplier: 1,
+    uCameraPos: new THREE.Vector3(0, 0, 60)
+  },
   `uniform float uTime; uniform float uProgress; uniform float sizeMultiplier;
   attribute vec3 aTargetPos; attribute float aRandom;
-  varying vec2 vUv; varying float vAlpha;
+  varying vec2 vUv; varying float vAlpha; varying float vRandom; varying float vDepth;
+  varying vec3 vWorldPos; varying vec3 vNormal;
   
   float cubicInOut(float t) { 
     return t < 0.5 ? 4.0 * t * t * t : 0.5 * pow(2.0 * t - 2.0, 3.0) + 1.0; 
@@ -144,39 +151,116 @@ const FoliageMaterial = shaderMaterial(
   
   void main() {
     vUv = uv;
+    vRandom = aRandom;
     float t = cubicInOut(uProgress);
     
-    // Optimize: compute noise inline without function calls
+    // 多层次噪声，创建更自然的树叶摆动
+    // 散开状态下 (t=0) 增加更多漂浮感
+    float floatScale = mix(2.0, 1.0, t);
+
     vec3 noise = vec3(
-      sin(uTime * 1.5 + position.x),
-      cos(uTime + position.y),
-      sin(uTime * 1.5 + position.z)
-    ) * 0.15;
+      sin(uTime * 0.8 * floatScale + position.x * 0.5) * 0.2 * floatScale,
+      cos(uTime * 1.2 * floatScale + position.y * 0.3) * 0.1 * floatScale,
+      sin(uTime * 1.5 * floatScale + position.z * 0.4) * 0.2 * floatScale
+    );
     
     vec3 finalPos = mix(position, aTargetPos + noise, t);
     vec4 mvPosition = modelViewMatrix * vec4(finalPos, 1.0);
+    vDepth = -mvPosition.z;
     
-    // Dynamic sizing with depth attenuation
-    gl_PointSize = (90.0 * (1.0 + aRandom) * sizeMultiplier) / -mvPosition.z;
+    // 根据随机数调整尺寸，创建密度变化
+    // 散开状态下粒子稍微大一点
+    float sizeState = mix(1.5, 1.0, t);
+    gl_PointSize = (100.0 * (0.8 + aRandom * 0.4) * sizeMultiplier * sizeState) / vDepth;
     gl_Position = projectionMatrix * mvPosition;
     
-    // Pass alpha for fade effects
-    vAlpha = mix(0.7, 1.0, t);
+    vAlpha = mix(0.8, 1.0, t);
+    vWorldPos = (modelMatrix * vec4(finalPos, 1.0)).xyz;
+    vNormal = normalize(finalPos); // 简化法线计算
   }`,
-  `uniform vec3 uColor;
+  `uniform vec3 uColor; uniform float uTime; uniform float uProgress;
   varying float vAlpha;
+  varying float vRandom;
+  varying float vDepth;
+  varying vec3 vWorldPos;
+  varying vec3 vNormal;
   
   void main() {
     vec2 center = gl_PointCoord - 0.5;
     float dist = length(center);
     if (dist > 0.5) discard;
     
-    // Soft edges for better blending
-    float alpha = smoothstep(0.5, 0.35, dist) * vAlpha;
+    // 柔和边缘，增强羽毛效果
+    float alpha = smoothstep(0.5, 0.15, dist) * vAlpha;
     
-    // Optimized color calculation
-    vec3 finalColor = uColor * (0.8 + 0.4 * (1.0 - dist * 2.0));
-    gl_FragColor = vec4(finalColor, alpha);
+    // ===== 多层次颜色系统 =====
+    vec3 darkGreen = vec3(0.01, 0.15, 0.05);    // 更深暗绿
+    vec3 midGreen = vec3(0.05, 0.30, 0.10);     // 降低亮度的中等绿
+    vec3 brightGreen = vec3(0.15, 0.50, 0.15);  // 纯正绿色，不发白
+    vec3 yellowGreen = vec3(0.25, 0.55, 0.10);  // 暗调黄绿
+    
+    // 星尘颜色 (散开状态)
+    vec3 starGold = vec3(1.0, 0.9, 0.5);
+    vec3 starPink = vec3(1.0, 0.7, 0.8);
+    vec3 starBlue = vec3(0.6, 0.8, 1.0);
+    vec3 starWhite = vec3(1.0, 1.0, 1.0);
+
+    // 基于随机值分层 - 树叶
+    vec3 leafColor;
+    if (vRandom < 0.3) {
+      leafColor = mix(darkGreen, midGreen, vRandom / 0.3);
+    } else if (vRandom < 0.7) {
+      leafColor = mix(midGreen, brightGreen, (vRandom - 0.3) / 0.4);
+    } else {
+      leafColor = mix(brightGreen, yellowGreen, (vRandom - 0.7) / 0.3);
+    }
+
+    // 基于随机值分层 - 星尘
+    vec3 chaosColor;
+    if (vRandom < 0.25) chaosColor = starGold;
+    else if (vRandom < 0.5) chaosColor = starPink;
+    else if (vRandom < 0.75) chaosColor = starBlue;
+    else chaosColor = starWhite;
+    
+    // 混合颜色
+    vec3 baseColor = mix(chaosColor, leafColor, smoothstep(0.0, 0.8, uProgress));
+    
+    // ===== 高光和反光效果 =====
+    // 模拟粗糙表面的微观高光
+    float specHighlight = pow(1.0 - dist, 3.0) * 0.5; // 降低高光基础强度
+    // 降低高光强度，特别是树叶状态 (uProgress 接近 1 时大幅降低高光，保留哑光质感)
+    float specIntensity = mix(0.8, 0.05, uProgress);
+    vec3 specColor = vec3(1.0) * specHighlight * specIntensity;
+    
+    // 根据深度的逐渐亮化（模拟光线穿透效果）
+    float depthFade = smoothstep(80.0, 15.0, vDepth);
+    vec3 depthGlow = vec3(0.05, 0.2, 0.05) * depthFade * 0.2; // 降低深度发光
+    
+    // 散开状态下的发光
+    vec3 chaosGlow = chaosColor * 0.6 * (1.0 - uProgress);
+
+    // ===== 闪光效果（基于时间和位置） =====
+    float flicker = sin(uTime * 3.0 + vRandom * 6.28) * 0.5 + 0.5;
+    float sparkle = pow(flicker, 3.0) * 0.3;
+    // 散开时闪烁明显，成树时大幅减弱闪烁，只保留微弱光泽
+    sparkle *= mix(2.0, 0.05, uProgress); // 树叶状态几乎不闪烁
+
+    vec3 sparkleColor = vec3(1.0, 0.95, 0.8) * sparkle * 0.4;
+    
+    // ===== 径向渐变高光 =====
+    float radialShine = (1.0 - dist * 1.5) * 0.4;
+    // 成树时减弱径向高光
+    radialShine *= mix(1.0, 0.0, uProgress);
+    
+    // 合并所有颜色分量
+    vec3 finalColor = baseColor;
+    finalColor += specColor;
+    finalColor += depthGlow * uProgress;
+    finalColor += chaosGlow;
+    finalColor += sparkleColor;
+    finalColor += vec3(radialShine * 0.1);
+    
+    gl_FragColor = vec4(finalColor, alpha * 0.95);
   }`
 );
 extend({ FoliageMaterial });
@@ -185,7 +269,7 @@ extend({ FoliageMaterial });
 const getTreePosition = () => {
   const h = CONFIG.tree.height; const rBase = CONFIG.tree.radius;
   const y = (Math.random() * h) - (h / 2); const normalizedY = (y + (h/2)) / h;
-  const currentRadius = rBase * (1 - normalizedY) * 0.65; // tighter radius
+  const currentRadius = rBase * Math.pow(1 - normalizedY, 1.2) * 0.8; // tighter radius with curve
   const theta = Math.random() * Math.PI * 2;
   const r = Math.random() * currentRadius;
   return [r * Math.cos(theta), y, r * Math.sin(theta)];
@@ -197,7 +281,7 @@ const FOLIAGE_CACHE = (() => {
   const positions = new Float32Array(MAX_FOLIAGE * 3);
   const targetPositions = new Float32Array(MAX_FOLIAGE * 3);
   const randoms = new Float32Array(MAX_FOLIAGE);
-  const spherePoints = random.inSphere(new Float32Array(MAX_FOLIAGE * 3), { radius: 25 }) as Float32Array;
+  const spherePoints = random.inSphere(new Float32Array(MAX_FOLIAGE * 3), { radius: 45 }) as Float32Array;
   for (let i = 0; i < MAX_FOLIAGE; i++) {
     positions[i*3] = spherePoints[i*3]; positions[i*3+1] = spherePoints[i*3+1]; positions[i*3+2] = spherePoints[i*3+2];
     const [tx, ty, tz] = getTreePosition();
@@ -228,7 +312,7 @@ const Foliage = ({ state, count, sizeMultiplier = 1 }: { state: 'CHAOS' | 'FORME
     mat.uTime = rootState.clock.elapsedTime;
     
     const targetProgress = state === 'FORMED' ? 1 : 0;
-    const newProgress = MathUtils.damp(mat.uProgress, targetProgress, 1.5, delta);
+    const newProgress = MathUtils.damp(mat.uProgress, targetProgress, 0.8, delta);
     
     // Only update if changed significantly (reduce GPU uploads)
     if (Math.abs(newProgress - mat.uProgress) > 0.001) {
@@ -246,7 +330,7 @@ const Foliage = ({ state, count, sizeMultiplier = 1 }: { state: 'CHAOS' | 'FORME
   }, [positions]);
 
   return (
-    <points>
+    <points raycast={() => null}>
       <bufferGeometry ref={geometryRef}>
         <bufferAttribute attach="attributes-position" args={[positions, 3]} />
         <bufferAttribute attach="attributes-aTargetPos" args={[targetPositions, 3]} />
@@ -370,25 +454,27 @@ const EnvelopeOrnaments = forwardRef(function EnvelopeOrnamentsComponent(
   // 使用配置的信封数量，如果评论为空则也显示信封（占位符模式）
   const count = ornamentCount ?? 50;
   const groupRef = useRef<THREE.Group>(null);
-  const { size, camera } = useThree();
+  const { camera } = useThree();
 
-  const envelopeGeometry = useMemo(() => new THREE.PlaneGeometry(1.0, 0.7), []);
+  const envelopeGeometry = useMemo(() => new THREE.BoxGeometry(1.6, 1.0, 0.06), []);
   const flapGeometry = useMemo(() => {
     const shape = new THREE.Shape();
-    shape.moveTo(-0.5, 0);
-    shape.lineTo(0, 0.35);
-    shape.lineTo(0.5, 0);
-    shape.lineTo(-0.5, 0);
+    shape.moveTo(-0.8, 0);
+    shape.lineTo(0, 0.55);
+    shape.lineTo(0.8, 0);
+    shape.lineTo(-0.8, 0);
     return new THREE.ShapeGeometry(shape);
   }, []);
 
   const projectToScreen = useCallback((pos: THREE.Vector3) => {
     const projected = pos.clone().project(camera);
+    const width = typeof window !== 'undefined' ? window.innerWidth : 1;
+    const height = typeof window !== 'undefined' ? window.innerHeight : 1;
     return {
-      x: (projected.x * 0.5 + 0.5) * size.width,
-      y: (-projected.y * 0.5 + 0.5) * size.height
+      x: (projected.x * 0.5 + 0.5) * width,
+      y: (-projected.y * 0.5 + 0.5) * height
     };
-  }, [camera, size.height, size.width]);
+  }, [camera]);
 
   const data = useMemo(() => {
     if (count === 0) return [];
@@ -462,14 +548,22 @@ const EnvelopeOrnaments = forwardRef(function EnvelopeOrnamentsComponent(
     });
   });
 
-  const openFromGroup = useCallback((group: THREE.Object3D, commentIndex: number) => {
+  const openFromGroup = useCallback((mesh: THREE.Object3D, commentIndex: number) => {
     // 如果没有评论，不打开信封
     if (commentIndex < 0 || comments.length === 0) return;
-    
+
+    // 确保矩阵最新
+    mesh.updateMatrixWorld(true);
+
+    // 直接取被点击 mesh 的世界坐标，避免 parent 偏差
     const worldPos = new THREE.Vector3();
-    group.getWorldPosition(worldPos);
+    mesh.getWorldPosition(worldPos);
     const screenPosition = projectToScreen(worldPos);
     const comment = comments[commentIndex % comments.length];
+
+    console.log('Envelope clicked:', { index: commentIndex, worldPos, screenPosition });
+
+    // 触发信封打开动画，从信封位置飞往中心
     onEnvelopeOpen?.({ comment, screenPosition });
   }, [comments, projectToScreen, onEnvelopeOpen]);
 
@@ -482,6 +576,10 @@ const EnvelopeOrnaments = forwardRef(function EnvelopeOrnamentsComponent(
       // 如果没有有效评论，返回 null
       if (commentIndex < 0 || comments.length === 0) return null;
       
+      // 确保矩阵最新
+      groupRef.current.updateMatrixWorld(true);
+      child.updateMatrixWorld(true);
+
       const worldPos = new THREE.Vector3();
       child.getWorldPosition(worldPos);
       return {
@@ -501,36 +599,49 @@ const EnvelopeOrnaments = forwardRef(function EnvelopeOrnamentsComponent(
           scale={[obj.scale, obj.scale, obj.scale]}
           rotation={state === 'CHAOS' ? obj.chaosRotation : [0,0,0]}
           userData={{ commentIndex: obj.commentIndex }}
-          onPointerDown={(e) => {
+          onClick={(e) => {
             e.stopPropagation();
             openFromGroup(e.object, obj.commentIndex);
           }}
         >
-          {/* 信封主体 */}
-          <mesh geometry={envelopeGeometry} position={[0, 0, 0]}>
+          {/* 信封主体 (3D 盒子) */}
+          <mesh 
+            geometry={envelopeGeometry} 
+            position={[0, 0, 0]}
+          >
             <meshStandardMaterial 
               color={obj.envelopeColor} 
-              roughness={0.6} 
+              roughness={0.3} 
               metalness={0.1}
               emissive={obj.envelopeColor}
-              emissiveIntensity={0.3}
+              emissiveIntensity={0.05}
             />
           </mesh>
           {/* 信封封口 */}
-          <mesh geometry={flapGeometry} position={[0, 0.175, 0.01]}>
+          <mesh 
+            geometry={flapGeometry} 
+            position={[0, 0.25, 0.031]}
+          >
             <meshStandardMaterial 
               color={obj.envelopeColor}
-              roughness={0.7} 
+              roughness={0.3} 
               metalness={0.1}
+              emissive={obj.envelopeColor}
+              emissiveIntensity={0.05}
             />
           </mesh>
-          {/* 爱心装饰 */}
-          <mesh position={[0, 0, 0.02]}>
-            <sphereGeometry args={[0.12, 16, 16]} />
+          {/* 火漆印装饰 (扁平球体模拟) */}
+          <mesh 
+            position={[0, 0, 0.04]}
+            scale={[1, 1, 0.5]}
+          >
+            <sphereGeometry args={[0.18, 32, 16]} />
             <meshStandardMaterial 
-              color="#FF69B4" 
-              emissive="#FF1493"
-              emissiveIntensity={0.5}
+              color="#C62828" 
+              emissive="#B71C1C"
+              emissiveIntensity={0.2}
+              roughness={0.2}
+              metalness={0.3}
             />
           </mesh>
         </group>
@@ -587,17 +698,29 @@ const ChristmasElements = ({ state, count }: { state: 'CHAOS' | 'FORMED', count:
       {data.map((obj, i) => {
         let geometry; if (obj.type === 0) geometry = boxGeometry; else if (obj.type === 1) geometry = sphereGeometry; else geometry = caneGeometry;
         return ( <mesh key={i} scale={[obj.scale, obj.scale, obj.scale]} geometry={geometry} rotation={obj.chaosRotation}>
-          <meshStandardMaterial color={obj.color} roughness={0.3} metalness={0.4} emissive={obj.color} emissiveIntensity={0.2} />
+          <meshStandardMaterial 
+            color={obj.color} 
+            roughness={0.2} 
+            metalness={0.6} 
+            emissive={obj.color} 
+            emissiveIntensity={0.3}
+          />
         </mesh> )})}
     </group>
   );
 };
 
 const Trunk = () => {
-  const geometry = useMemo(() => new THREE.CylinderGeometry(1.4, 1.6, 6, 12), []);
+  const geometry = useMemo(() => new THREE.CylinderGeometry(1.4, 1.6, 6, 16), []);
   return (
     <mesh position={[0, -(CONFIG.tree.height / 2) - 3, 0]} geometry={geometry} receiveShadow castShadow>
-      <meshStandardMaterial color="#8b5a2b" roughness={0.85} metalness={0.1} />
+      <meshStandardMaterial 
+        color="#6B4423" 
+        roughness={0.9} 
+        metalness={0.05}
+        emissive="#4a2f1a"
+        emissiveIntensity={0.1}
+      />
     </mesh>
   );
 };
@@ -630,7 +753,9 @@ const FairyLights = ({ state, count }: { state: 'CHAOS' | 'FORMED', count: numbe
       const mesh = child as THREE.Mesh;
       mesh.position.copy(objData.currentPos);
       const intensity = (Math.sin(time * objData.speed + objData.timeOffset) + 1) / 2;
-      if (mesh.material) { (mesh.material as THREE.MeshStandardMaterial).emissiveIntensity = isFormed ? 3 + intensity * 4 : 0; }
+      if (mesh.material) { 
+        (mesh.material as THREE.MeshStandardMaterial).emissiveIntensity = isFormed ? 4 + intensity * 6 : 0; 
+      }
     });
   });
 
@@ -677,12 +802,17 @@ const SpiralLightStrip = ({ state, isLit }: { state: 'CHAOS' | 'FORMED', isLit: 
       const time = stateObj.clock.elapsedTime;
       const material = meshRef.current.material as THREE.MeshStandardMaterial;
       if (isLit) {
-        // 点亮时：流动的彩色效果
-        const intensity = 2 + Math.sin(time * 3) * 0.5;
+        // 点亮时：流动的彩色效果，更强烈的脉动
+        const intensity = 3.5 + Math.sin(time * 4) * 1.5;
         material.emissiveIntensity = intensity;
+        material.roughness = 0.1;
+        material.metalness = 0.9;
       } else {
-        // 未点亮时：微弱发光
-        material.emissiveIntensity = 0.2;
+        // 未点亮时：微妙的呼吸效果 + 金属光泽
+        const breathe = Math.sin(time * 0.5) * 0.15 + 0.35;
+        material.emissiveIntensity = breathe;
+        material.roughness = 0.2;
+        material.metalness = 0.85;
       }
     }
     
@@ -692,16 +822,19 @@ const SpiralLightStrip = ({ state, isLit }: { state: 'CHAOS' | 'FORMED', isLit: 
     }
   });
 
-  const lightColor = isLit ? '#FFD700' : '#666666';
+  const lightColor = isLit ? '#FFD700' : '#C9A961';  // 点亮时金黄，未点亮时古铜金
+  const emissiveColor = isLit ? '#FFD700' : '#8B7355'; // 未点亮时更暗的发光色
 
   return (
     <group ref={groupRef}>
       <mesh ref={meshRef} geometry={tubeGeometry}>
         <meshStandardMaterial
           color={lightColor}
-          emissive={lightColor}
-          emissiveIntensity={isLit ? 2 : 0.2}
+          emissive={emissiveColor}
+          emissiveIntensity={isLit ? 3.5 : 0.35}
           toneMapped={false}
+          roughness={isLit ? 0.1 : 0.2}
+          metalness={isLit ? 0.9 : 0.85}
         />
       </mesh>
     </group>
@@ -787,7 +920,8 @@ const Experience = ({
   fogColor, 
   isMobile, 
   counts,
-  isLightStripLit
+  isLightStripLit,
+  handYRef
 }: { 
   sceneState: 'CHAOS' | 'FORMED', 
   photoUrls: string[], 
@@ -798,11 +932,31 @@ const Experience = ({
   fogColor: string, 
   isMobile: boolean, 
   counts: typeof CONFIG.counts,
-  isLightStripLit: boolean
+  isLightStripLit: boolean,
+  handYRef: React.MutableRefObject<number | null>
 }) => {
   const controlsRef = useRef<any>(null);
-  useFrame(() => {
+  const groupRef = useRef<THREE.Group>(null);
+  
+  useFrame((_state, delta) => {
     if (controlsRef.current) controlsRef.current.update();
+    
+    if (groupRef.current) {
+      // 默认位置
+      let targetY = 8;
+      
+      // 如果检测到手势，根据手的位置调整 Y 轴
+      // handYRef.current 范围 0 (top) -> 1 (bottom)
+      // 映射: 0 -> 20, 1 -> -4 (范围 24)
+      if (handYRef.current !== null) {
+        // 反转 Y 轴，手向上 (0) 树向上，手向下 (1) 树向下
+        const offset = (0.5 - handYRef.current) * 35;
+        targetY = 8 + offset;
+      }
+      
+      // 平滑移动
+      groupRef.current.position.y = MathUtils.damp(groupRef.current.position.y, targetY, 2.5, delta);
+    }
   });
 
   return (
@@ -825,14 +979,25 @@ const Experience = ({
       <Stars radius={100} depth={50} count={1200} factor={3.2} saturation={0} fade speed={1} />
       <Environment preset="night" background={false} />
 
-      <ambientLight intensity={0.4} color="#003311" />
-      <pointLight position={[30, 30, 30]} intensity={100} color={CONFIG.colors.warmLight} />
-      <pointLight position={[-30, 10, -30]} intensity={50} color={CONFIG.colors.gold} />
-      <pointLight position={[0, -20, 10]} intensity={30} color="#ffffff" />
+      {/* 增强光源系统 - 参考1.html的多光源设计 */}
+      <ambientLight intensity={0.5} color="#003311" />
+      
+      {/* 主内部光源（树内部的温暖光） */}
+      <pointLight position={[0, 5, 0]} intensity={120} color="#ffaa00" distance={25} decay={2} />
+      
+      {/* 金色聚光（侧边高光） */}
+      <pointLight position={[30, 30, 30]} intensity={100} color={CONFIG.colors.warmLight} decay={2} />
+      
+      {/* 蓝色补光（冷色调平衡） */}
+      <pointLight position={[-30, 10, -30]} intensity={60} color="#6688ff" decay={2} />
+      
+      {/* 底部填光（白光） */}
+      <pointLight position={[0, -20, 10]} intensity={40} color="#ffffff" decay={2} />
 
-      <group position={[0, 8, 0]}>
+      <group ref={groupRef} position={[0, 8, 0]}>
         {sceneState === 'FORMED' && <Trunk />}
-        <Foliage state={sceneState} count={Math.floor(counts.foliage * 0.5)} sizeMultiplier={1.6} />
+        <Foliage state={sceneState} count={Math.floor(counts.foliage * 0.7)} sizeMultiplier={1.8} />
+        <Foliage state={sceneState} count={Math.floor(counts.foliage * 0.3)} sizeMultiplier={1.2} />
         <Suspense fallback={null}>
           <PhotoOrnaments state={sceneState} photoUrls={photoUrls} ornamentCount={counts.ornaments} />
           <EnvelopeOrnaments ref={envelopesRef} state={sceneState} comments={comments} onEnvelopeOpen={onEnvelopeOpen} ornamentCount={DENSITY_CONFIG.envelopes} />
@@ -841,12 +1006,19 @@ const Experience = ({
           <SpiralLightStrip state={sceneState} isLit={isLightStripLit} />
           <TopStar state={sceneState} onClick={onStarClick} isLit={isLightStripLit} />
         </Suspense>
-        <Sparkles count={isMobile ? 120 : 220} scale={45} size={6.5} speed={0.32} opacity={0.3} color={CONFIG.colors.silver} />
+        <Sparkles count={isMobile ? 120 : 220} scale={45} size={6.5} speed={0.32} opacity={0.3} color={CONFIG.colors.silver} raycast={() => null} />
       </group>
 
       {!isMobile && (
         <EffectComposer>
-          <Bloom luminanceThreshold={0.8} luminanceSmoothing={0.1} intensity={1.3} radius={0.45} mipmapBlur />
+          {/* 增强Bloom以突出闪光和反光效果 */}
+          <Bloom 
+            luminanceThreshold={0.7} 
+            luminanceSmoothing={0.08} 
+            intensity={1.8} 
+            radius={0.6} 
+            mipmapBlur 
+          />
         </EffectComposer>
       )}
     </>
@@ -854,128 +1026,7 @@ const Experience = ({
 };
 
 // --- Gesture Controller ---
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-const GestureController = ({ onGesture, onStatus, onPinchStart, debugMode }: any) => {
-  const videoRef = useRef<HTMLVideoElement>(null);
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const pinchActiveRef = useRef(false);
-  const pinchBlockUntilRef = useRef(0);
-
-  useEffect(() => {
-    // 检查是否启用手势控制
-    if (!FEATURE_FLAGS.enableGestureControl) {
-      onStatus("GESTURE CONTROL DISABLED");
-      return;
-    }
-
-    let gestureRecognizer: GestureRecognizer;
-    let requestRef: number;
-
-    const setup = async () => {
-      onStatus("DOWNLOADING AI...");
-      try {
-        const vision = await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/wasm");
-        gestureRecognizer = await GestureRecognizer.createFromOptions(vision, {
-          baseOptions: {
-            modelAssetPath: "https://storage.googleapis.com/mediapipe-models/gesture_recognizer/gesture_recognizer/float16/1/gesture_recognizer.task",
-            delegate: "GPU"
-          },
-          runningMode: "VIDEO",
-          numHands: 1
-        });
-        onStatus("REQUESTING CAMERA...");
-        if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
-          const stream = await navigator.mediaDevices.getUserMedia({ video: true });
-          if (videoRef.current) {
-            videoRef.current.srcObject = stream;
-            videoRef.current.play();
-            onStatus("AI READY: SHOW HAND");
-            predictWebcam();
-          }
-        } else {
-            onStatus("ERROR: CAMERA PERMISSION DENIED");
-        }
-      } catch (err: any) {
-        onStatus(`ERROR: ${err.message || 'MODEL FAILED'}`);
-      }
-    };
-
-    const predictWebcam = () => {
-      if (gestureRecognizer && videoRef.current && canvasRef.current) {
-        if (videoRef.current.videoWidth > 0) {
-            const results = gestureRecognizer.recognizeForVideo(videoRef.current, Date.now());
-            const ctx = canvasRef.current.getContext("2d");
-            if (ctx && debugMode) {
-                ctx.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
-                canvasRef.current.width = videoRef.current.videoWidth; canvasRef.current.height = videoRef.current.videoHeight;
-                if (results.landmarks) for (const landmarks of results.landmarks) {
-                        const drawingUtils = new DrawingUtils(ctx);
-                        drawingUtils.drawConnectors(landmarks, GestureRecognizer.HAND_CONNECTIONS, { color: "#FFD700", lineWidth: 2 });
-                        drawingUtils.drawLandmarks(landmarks, { color: "#FF0000", lineWidth: 1 });
-                }
-            } else if (ctx && !debugMode) ctx.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
-
-            let isPinching = false;
-            let isGesturing = false;
-
-            // 优先识别握拳/张手手势
-            if (results.gestures.length > 0) {
-              const name = results.gestures[0][0].categoryName;
-              const score = results.gestures[0][0].score;
-              if (score > 0.4 && (name === "Open_Palm" || name === "Closed_Fist")) {
-                isGesturing = true;
-                if (name === "Open_Palm") onGesture("CHAOS");
-                if (name === "Closed_Fist") {
-                  onGesture("FORMED");
-                  pinchBlockUntilRef.current = Date.now() + 700; // 握拳后短暂屏蔽捏合
-                }
-                if (debugMode) onStatus(`DETECTED: ${name}`);
-              }
-            }
-
-            if (results.landmarks.length > 0) {
-              const hand = results.landmarks[0];
-              const pinchBlocked = Date.now() < pinchBlockUntilRef.current;
-
-              // 只在没有握拳/张手手势且不在屏蔽期时才允许捏合
-              if (!isGesturing && !pinchBlocked) {
-                const thumbTip = hand[4];
-                const indexTip = hand[8];
-                const wrist = hand[0];
-                const indexMcp = hand[5];
-                const palmSpan = Math.hypot(indexMcp.x - wrist.x, indexMcp.y - wrist.y) || 1;
-                const pinchDistance = Math.hypot(thumbTip.x - indexTip.x, thumbTip.y - indexTip.y);
-                isPinching = pinchDistance < Math.max(0.02, palmSpan * 0.4);
-
-                if (isPinching && !pinchActiveRef.current) {
-                  pinchActiveRef.current = true;
-                  if (onPinchStart) onPinchStart();
-                  if (debugMode) onStatus("PINCH: 抽祝福");
-                } else if (!isPinching && pinchActiveRef.current) {
-                  pinchActiveRef.current = false;
-                }
-              } else if (pinchActiveRef.current) {
-                // 如果在捏合状态但检测到手势或屏蔽期，强制结束捏合
-                pinchActiveRef.current = false;
-              }
-            } else { 
-              if (debugMode) onStatus("AI READY: NO HAND"); 
-            }
-        }
-        requestRef = requestAnimationFrame(predictWebcam);
-      }
-    };
-    setup();
-    return () => cancelAnimationFrame(requestRef);
-  }, [onGesture, onStatus, onPinchStart, debugMode]);
-
-  return (
-    <>
-      <video ref={videoRef} style={{ opacity: debugMode ? 0.6 : 0, position: 'fixed', top: 0, right: 0, width: debugMode ? '320px' : '1px', zIndex: debugMode ? 100 : -1, pointerEvents: 'none', transform: 'scaleX(-1)' }} playsInline muted autoPlay />
-      <canvas ref={canvasRef} style={{ position: 'fixed', top: 0, right: 0, width: debugMode ? '320px' : '1px', height: debugMode ? 'auto' : '1px', zIndex: debugMode ? 101 : -1, pointerEvents: 'none', transform: 'scaleX(-1)' }} />
-    </>
-  );
-};
+// (Moved to src/GestureController.tsx)
 
 // --- App Entry ---
 export default function GrandTreeApp() {
@@ -995,6 +1046,7 @@ export default function GrandTreeApp() {
   const [userAuth, setUserAuth] = useState<{ nick: string; mail: string } | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const envelopesRef = useRef<EnvelopeOrnamentsHandle>(null);
+  const handYRef = useRef<number | null>(null);
 
   // Waline 评论集成
   const { comments, count: commentCount, getRandomComment, fetchComments } = useWalineComments();
@@ -1030,14 +1082,26 @@ export default function GrandTreeApp() {
 
   const photoUrls = useMemo(() => (photoAssets.length ? photoAssets : [FALLBACK_PHOTO]), [photoAssets]);
 
-  const counts = useMemo(() => (
-    isMobile ? {
-      foliage: 12000,
+  const counts = useMemo(() => {
+    // 基础配置数量
+    const baseConfig = isMobile ? {
+      foliage: 16000,
       ornaments: 90,
       elements: 110,
       lights: 120
-    } : CONFIG.counts
-  ), [isMobile]);
+    } : CONFIG.counts;
+
+    // 自动调整照片挂件数量：
+    // 1. 至少显示所有照片 (photoUrls.length)
+    // 2. 至少达到基础密度 (baseConfig.ornaments)
+    // 这样如果照片少，会重复显示以保证美观；如果照片多，会全部显示
+    const adjustedOrnaments = Math.max(baseConfig.ornaments, photoUrls.length);
+
+    return {
+      ...baseConfig,
+      ornaments: adjustedOrnaments
+    };
+  }, [isMobile, photoUrls.length]);
 
   useEffect(() => {
     const handleResize = () => setIsMobile(window.innerWidth <= 820);
@@ -1106,10 +1170,7 @@ export default function GrandTreeApp() {
             key: Date.now(),
             origin: { x: window.innerWidth / 2, y: window.innerHeight / 2 }
           });
-          setTimeout(() => {
-            setFloatingComment(prev => prev ? { ...prev, phase: 'hide' } : null);
-          }, 5000);
-          setTimeout(() => setIsAnimating(false), 800);
+          setTimeout(() => setIsAnimating(false), 1000);
           return;
         } catch {
           setIsAnimating(false);
@@ -1132,11 +1193,7 @@ export default function GrandTreeApp() {
         key: Date.now(),
         origin: picked.screenPosition
       });
-      setTimeout(() => {
-        setFloatingComment(prev => prev ? { ...prev, phase: 'hide' } : null);
-      }, 5000);
-      // 动画结束后解除锁定
-      setTimeout(() => setIsAnimating(false), 800);
+      setTimeout(() => setIsAnimating(false), 1000);
       return;
     }
     // 降级方案：直接从评论列表随机选择
@@ -1152,10 +1209,7 @@ export default function GrandTreeApp() {
       key: Date.now(),
       origin: { x: window.innerWidth / 2, y: window.innerHeight / 2 }
     });
-    setTimeout(() => {
-      setFloatingComment(prev => prev ? { ...prev, phase: 'hide' } : null);
-    }, 5000);
-    setTimeout(() => setIsAnimating(false), 800);
+    setTimeout(() => setIsAnimating(false), 1000);
   }, [getRandomComment, isAnimating, comments]);
 
   const handlePinchStart = useCallback(() => {
@@ -1197,7 +1251,10 @@ export default function GrandTreeApp() {
   }, []);
 
   const handleCommentAnimationEnd = () => {
-    setFloatingComment(prev => (prev && prev.phase === 'hide' ? null : prev));
+    // 动画结束时清除状态
+    if (floatingComment?.phase === 'hide') {
+      setFloatingComment(null);
+    }
   };
 
   const handleEnvelopeOpen = useCallback((payload: EnvelopeOpenPayload) => {
@@ -1207,7 +1264,7 @@ export default function GrandTreeApp() {
       key: Date.now(),
       origin: payload.screenPosition
     });
-    // 移除自动消失，用户需要手动关闭
+    // 用户需要手动关闭，不自动消失
   }, []);
 
   return (
@@ -1261,14 +1318,16 @@ export default function GrandTreeApp() {
               isMobile={isMobile}
               counts={counts}
               isLightStripLit={isLightStripLit}
+              handYRef={handYRef}
             />
         </Canvas>
       </div>
 
       <GestureController
         onGesture={setSceneState}
-        onStatus={() => {}}
+        onStatus={(msg: string) => console.log('[Gesture]', msg)}
         onPinchStart={handlePinchStart}
+        onHandMove={(y: number | null) => { handYRef.current = y; }}
         debugMode={debugMode}
       />
 
@@ -1342,7 +1401,7 @@ export default function GrandTreeApp() {
           {/* 背景遮罩，点击关闭 */}
           <div
             className="floating-comment-overlay"
-            onClick={() => setFloatingComment(prev => (prev ? { ...prev, phase: 'hide' } : prev))}
+            onClick={() => setFloatingComment(prev => prev ? { ...prev, phase: 'hide' } : null)}
           />
           <div
             key={floatingComment.key}

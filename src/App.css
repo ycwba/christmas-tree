@@ -1101,22 +1101,37 @@ body, html {
   cursor: default;
   --from-x: 50vw;
   --from-y: 50vh;
+  perspective: 1000px;
 }
 
 .floating-comment__card {
   min-width: min(75vw, 500px);
   max-width: min(85vw, 650px);
-  background: linear-gradient(135deg, rgba(255, 255, 255, 0.98), rgba(255, 250, 245, 0.98));
-  border-radius: 24px;
+  background: linear-gradient(135deg, rgba(255, 255, 255, 0.99), rgba(255, 250, 245, 0.99));
+  border-radius: 20px;
   padding: 32px;
-  box-shadow: 0 30px 70px rgba(0, 0, 0, 0.35), 
-              0 0 40px rgba(255, 215, 0, 0.5),
-              inset 0 1px 0 rgba(255, 255, 255, 0.8);
-  border: 3px solid rgba(255, 215, 0, 0.7);
+  box-shadow: 
+    0 40px 80px rgba(0, 0, 0, 0.3),
+    0 0 60px rgba(255, 215, 0, 0.6),
+    inset 0 1px 0 rgba(255, 255, 255, 0.9);
+  border: 3px solid rgba(255, 215, 0, 0.8);
   backdrop-filter: blur(12px);
   display: flex;
   gap: 20px;
   align-items: flex-start;
+  /* 信封效果：上边缘阴影 */
+  position: relative;
+}
+
+.floating-comment__card::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, rgba(255, 215, 0, 0.8), transparent);
+  border-radius: 20px 20px 0 0;
 }
 
 .floating-comment__avatar {
@@ -1125,8 +1140,9 @@ body, html {
   height: 60px;
   border-radius: 50%;
   overflow: hidden;
-  border: 3px solid rgba(255, 215, 0, 0.6);
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+  border: 3px solid rgba(255, 215, 0, 0.7);
+  box-shadow: 0 6px 16px rgba(255, 215, 0, 0.3);
+  background: linear-gradient(135deg, #FFD700, #FFA500);
 }
 
 .floating-comment__avatar img {
@@ -1215,36 +1231,52 @@ body, html {
 }
 
 .floating-comment--show {
-  animation: commentFlyIn 0.8s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
+  animation: envelopeFlyIn 1.0s cubic-bezier(0.25, 0.46, 0.45, 0.94) forwards;
 }
 
 .floating-comment--hide {
-  animation: commentFlyOut 0.6s ease-in forwards;
+  animation: envelopeFlyOut 0.7s cubic-bezier(0.55, 0.055, 0.675, 0.19) forwards;
 }
 
-@keyframes commentFlyIn {
+/* 信封从树上飞出的动画 */
+@keyframes envelopeFlyIn {
   0% { 
-    transform: translate(calc(var(--from-x) - 50vw), calc(var(--from-y) - 50vh)) scale(0.2) rotate(-15deg); 
-    opacity: 0; 
+    /* 从原始位置开始 - 修正坐标计算，确保中心对齐 */
+    transform: translate(calc(var(--from-x) - 50vw), calc(var(--from-y) - 50vh)) translate(-50%, -50%) scale(0.6) rotateY(-45deg);
+    opacity: 0;
+    filter: blur(4px);
   }
-  60% { 
-    transform: translate(calc((var(--from-x) - 50vw) * 0.2), calc((var(--from-y) - 50vh) * 0.2)) scale(1.08) rotate(3deg); 
-    opacity: 0.95; 
+  40% { 
+    /* 快速飞行中，带有旋转 */
+    opacity: 0.8;
+    filter: blur(2px);
   }
   100% { 
-    transform: translate(-50%, -50%) scale(1) rotate(0deg); 
-    opacity: 1; 
+    /* 到达中心，完全展开 */
+    transform: translate(-50%, -50%) scale(1) rotateY(0deg);
+    opacity: 1;
+    filter: blur(0px);
   }
 }
 
-@keyframes commentFlyOut {
+/* 信封飞回树的动画 */
+@keyframes envelopeFlyOut {
   0% { 
-    transform: translate(-50%, -50%) scale(1) rotate(0deg); 
-    opacity: 1; 
+    /* 从中心开始 */
+    transform: translate(-50%, -50%) scale(1) rotateY(0deg);
+    opacity: 1;
+    filter: blur(0px);
+  }
+  60% {
+    /* 飞行中逐渐缩小 */
+    opacity: 0.6;
+    filter: blur(1px);
   }
   100% { 
-    transform: translate(calc(var(--from-x) - 50vw), calc(var(--from-y) - 50vh)) scale(0.15) rotate(12deg); 
-    opacity: 0; 
+    /* 回到原始位置 */
+    transform: translate(calc(var(--from-x) - 50vw), calc(var(--from-y) - 50vh)) translate(-50%, -50%) scale(0.5) rotateY(45deg);
+    opacity: 0;
+    filter: blur(4px);
   }
 }
 

@@ -2,6 +2,9 @@ import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import fs from 'node:fs'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
 const createPublicAssetsPlugin = () => {
   const photoModuleId = 'virtual:photos'
@@ -13,7 +16,7 @@ const createPublicAssetsPlugin = () => {
       ? fs
           .readdirSync(dir)
           .filter((file) => pattern.test(file))
-          .map((file) => `/${folder}/${file.replace(/\\/g, '/')}`)
+          .map((file) => `/${folder}/${encodeURIComponent(file)}`)
       : []
 
     return `export const ${exportName} = ${JSON.stringify(files)};`
