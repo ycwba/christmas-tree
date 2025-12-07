@@ -40,8 +40,8 @@ const CONFIG = {
     candyColors: ['#FF0000', '#FFFFFF']
   },
   counts: {
-    foliage: 15000,
-    ornaments: 300,   // 拍立得照片数量
+    foliage: 28000,
+    ornaments: 180,   // 拍立得照片数量（降低密度）
     elements: 200,    // 圣诞元素数量
     lights: 400       // 彩灯数量
   },
@@ -227,7 +227,8 @@ const PhotoOrnaments = forwardRef(function PhotoOrnamentsComponent(
       const chaosPos = new THREE.Vector3((Math.random()-0.5)*70, (Math.random()-0.5)*70, (Math.random()-0.5)*70);
       const h = CONFIG.tree.height; const y = (Math.random() * h) - (h / 2);
       const rBase = CONFIG.tree.radius;
-      const currentRadius = (rBase * (1 - (y + (h/2)) / h)) + 0.5;
+      const baseRadius = (rBase * (1 - (y + (h/2)) / h)) + 0.5;
+      const currentRadius = baseRadius * 0.82 + 0.2; // 更靠内，叶子包裹照片
       const theta = Math.random() * Math.PI * 2;
       const targetPos = new THREE.Vector3(currentRadius * Math.cos(theta), y, currentRadius * Math.sin(theta));
 
@@ -241,6 +242,11 @@ const PhotoOrnaments = forwardRef(function PhotoOrnamentsComponent(
         y: (Math.random() - 0.5) * 1.0,
         z: (Math.random() - 0.5) * 1.0
       };
+      const tilt = {
+        x: (Math.random() - 0.5) * 0.3,
+        y: (Math.random() - 0.5) * 0.5,
+        z: (Math.random() - 0.5) * 0.3
+      };
       const chaosRotation = new THREE.Euler(Math.random()*Math.PI, Math.random()*Math.PI, Math.random()*Math.PI);
 
       return {
@@ -251,7 +257,8 @@ const PhotoOrnaments = forwardRef(function PhotoOrnamentsComponent(
         chaosRotation,
         rotationSpeed,
         wobbleOffset: Math.random() * 10,
-        wobbleSpeed: 0.5 + Math.random() * 0.5
+        wobbleSpeed: 0.5 + Math.random() * 0.5,
+        tilt
       };
     });
   }, [textures, count]);
@@ -274,8 +281,9 @@ const PhotoOrnaments = forwardRef(function PhotoOrnamentsComponent(
 
          const wobbleX = Math.sin(time * objData.wobbleSpeed + objData.wobbleOffset) * 0.05;
          const wobbleZ = Math.cos(time * objData.wobbleSpeed * 0.8 + objData.wobbleOffset) * 0.05;
-         group.rotation.x += wobbleX;
-         group.rotation.z += wobbleZ;
+         group.rotation.x += objData.tilt.x + wobbleX;
+         group.rotation.y += objData.tilt.y * 0.6;
+         group.rotation.z += objData.tilt.z + wobbleZ;
 
       } else {
          group.rotation.x += delta * objData.rotationSpeed.x;
@@ -699,7 +707,6 @@ const GestureController = ({ onGesture, onMove, onStatus, onPinchStart, onPinchE
 export default function GrandTreeApp() {
   const [sceneState, setSceneState] = useState<'CHAOS' | 'FORMED'>('CHAOS');
   const [rotationSpeed, setRotationSpeed] = useState(0);
-  const [aiStatus, setAiStatus] = useState("INITIALIZING...");
   const [debugMode, setDebugMode] = useState(false);
   const [backgroundId, setBackgroundId] = useState<string>(DEFAULT_BACKGROUND_ID);
   const [floatingPhoto, setFloatingPhoto] = useState<{ url: string; phase: 'grab' | 'release'; key: number; origin: { x: number; y: number } } | null>(null);
@@ -748,10 +755,7 @@ export default function GrandTreeApp() {
   };
 
   const handleStarClick = useCallback(() => {
-    if (!musicTracks.length) {
-      setAiStatus('未找到音乐文件');
-      return;
-    }
+    if (!musicTracks.length) return;
 
     if (!audioRef.current) {
       const pick = musicTracks[Math.floor(Math.random() * musicTracks.length)];
@@ -765,7 +769,7 @@ export default function GrandTreeApp() {
     if (player.paused) {
       // 继续播放 / 重新播放
       if (player.ended) player.currentTime = 0;
-      player.play().then(() => setIsPlayingMusic(true)).catch(() => setAiStatus('音乐播放需要浏览器授权'));
+      player.play().then(() => setIsPlayingMusic(true)).catch(() => console.warn('音乐播放需要浏览器授权'));
     } else {
       // 暂停
       player.pause();
@@ -789,7 +793,12 @@ export default function GrandTreeApp() {
         <video className="bg-media" src={activeBackground.mediaUrl} autoPlay loop muted playsInline />
       )}
       <div className="canvas-wrap">
-        <Canvas dpr={[1, 2]} gl={{ toneMapping: THREE.ReinhardToneMapping, alpha: true }} shadows>
+        <Canvas
+          dpr={[1, 2]}
+          gl={{ toneMapping: THREE.ReinhardToneMapping, alpha: true, antialias: true, preserveDrawingBuffer: true }}
+          frameloop="always"
+          shadows
+        >
             <Experience
               sceneState={sceneState}
               rotationSpeed={rotationSpeed}
@@ -805,15 +814,13 @@ export default function GrandTreeApp() {
       <GestureController
         onGesture={setSceneState}
         onMove={setRotationSpeed}
-        onStatus={setAiStatus}
+        onStatus={() => {}}
         onPinchStart={handlePinchStart}
         onPinchEnd={handlePinchEnd}
         debugMode={debugMode}
       />
 
-      <div className="hud hud--status" data-error={aiStatus.includes('ERROR')}>
-        {aiStatus}
-      </div>
+      {/* AI 状态提示移除，避免弹窗干扰移动端体验 */}
 
       <div className="hud hud--chip" data-active={isPlayingMusic}>
         {isPlayingMusic ? '♫ 正在播放音乐' : '点亮星星播放音乐'}

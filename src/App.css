@@ -73,7 +73,7 @@ body, html {
   object-fit: cover;
   z-index: 0;
   pointer-events: none;
-  background: #000;
+  background: var(--bg-base);
 }
 
 .canvas-wrap canvas { background: transparent !important; }
@@ -125,21 +125,22 @@ body, html {
 .hud--stats { display: none; }
 
 .hud--controls {
-  bottom: 22px;
-  right: 18px;
+  bottom: 16px;
+  left: 16px;
+  right: 16px;
   display: flex;
-  gap: 12px;
+  gap: 10px;
   flex-wrap: wrap;
   align-items: center;
-  justify-content: flex-end;
-  max-width: 92vw;
+  justify-content: center;
+  max-width: 100%;
 }
 
 .ui-button {
   position: relative;
   border-radius: 16px;
   border: 1px solid rgba(255, 255, 255, 0.32);
-  padding: 12px 18px;
+  padding: 11px 16px;
   font-size: 14px;
   font-weight: 800;
   background: linear-gradient(135deg, rgba(255, 255, 255, 0.14), rgba(255, 255, 255, 0.05));
@@ -186,7 +187,7 @@ body, html {
   background: rgba(255, 255, 255, 0.65);
   border: 1px solid rgba(0, 0, 0, 0.05);
   border-radius: 14px;
-  padding: 8px 12px;
+  padding: 8px 10px;
   box-shadow: 0 8px 18px rgba(0,0,0,0.12);
   color: #0f1b29;
 }
@@ -293,18 +294,20 @@ body, html {
   .stat-block { min-width: 140px; }
 
   .hud--controls {
-    left: 12px;
-    right: 12px;
+    left: 10px;
+    right: 10px;
+    bottom: 12px;
     justify-content: center;
   }
 
   .ui-button {
-    flex: 1 1 150px;
+    flex: 1 1 calc(50% - 12px);
+    min-width: 140px;
     text-align: center;
   }
 
   .ui-select {
-    flex: 1 1 200px;
+    flex: 1 1 100%;
   }
 
   .hud--chip { right: 12px; }
