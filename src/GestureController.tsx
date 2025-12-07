@@ -6,7 +6,8 @@ interface GestureControllerProps {
   onGesture: (state: 'CHAOS' | 'FORMED') => void;
   onStatus: (status: string) => void;
   onPinchStart?: () => void;
-  onHandMove?: (y: number | null) => void;
+  onPinchEnd?: () => void;
+  onHandMove?: (x: number | null, y: number | null) => void;
   debugMode: boolean;
 }
 
@@ -14,6 +15,7 @@ export const GestureController = ({
   onGesture, 
   onStatus, 
   onPinchStart, 
+  onPinchEnd,
   onHandMove, 
   debugMode 
 }: GestureControllerProps) => {
@@ -161,10 +163,10 @@ export const GestureController = ({
         if (results.landmarks.length > 0) {
           const hand = results.landmarks[0];
           
-          // 1. 手部位置追踪 (Y轴)
-          // MediaPipe Y坐标: 0 (top) -> 1 (bottom)
+          // 1. 手部位置追踪 (X, Y轴)
+          // MediaPipe 坐标: 0 (top/left) -> 1 (bottom/right)
           if (onHandMove) {
-            onHandMove(hand[0].y);
+            onHandMove(hand[0].x, hand[0].y);
           }
 
           // 2. 手势识别
@@ -182,7 +184,7 @@ export const GestureController = ({
               } else if (name === "Closed_Fist") {
                 isGesturing = true;
                 onGesture("FORMED");
-                pinchBlockUntilRef.current = Date.now() + 700; // 握拳后短暂屏蔽捏合
+                pinchBlockUntilRef.current = Date.now() + 1000; // 握拳后屏蔽捏合 1秒
                 if (debugMode) onStatus(`DETECTED: FIST (${(score*100).toFixed(0)}%)`);
               }
             }
@@ -190,7 +192,14 @@ export const GestureController = ({
 
           // 3. 捏合检测 (仅在未识别出明确手势时)
           const pinchBlocked = Date.now() < pinchBlockUntilRef.current;
-          if (!isGesturing && !pinchBlocked) {
+          
+          // 如果正在做手势（如握拳），强制结束捏合状态
+          if (isGesturing) {
+             if (pinchActiveRef.current) {
+                pinchActiveRef.current = false;
+                if (onPinchEnd) onPinchEnd();
+             }
+          } else if (!pinchBlocked) {
             const thumbTip = hand[4];
             const indexTip = hand[8];
             const wrist = hand[0];
@@ -210,15 +219,17 @@ export const GestureController = ({
                 if (debugMode) onStatus("ACTION: PINCH");
               }
             } else {
-              pinchActiveRef.current = false;
+              if (pinchActiveRef.current) {
+                pinchActiveRef.current = false;
+                if (onPinchEnd) onPinchEnd();
+                if (debugMode) onStatus("ACTION: RELEASE");
+              }
             }
-          } else if (pinchActiveRef.current) {
-            pinchActiveRef.current = false;
           }
 
         } else {
           // 未检测到手
-          if (onHandMove) onHandMove(null);
+          if (onHandMove) onHandMove(null, null);
           if (debugMode) onStatus("AI RUNNING: NO HAND");
         }
 

@@ -955,18 +955,22 @@ const Experience = ({
     
     if (groupRef.current) {
       // 默认位置
-      let targetY = 8;
+      const targetY = 8;
       
-      // 如果检测到手势，根据手的位置调整 Y 轴
-      // handYRef.current 范围 0 (top) -> 1 (bottom)
-      // 映射: 0 -> 20, 1 -> -4 (范围 24)
+      // 如果检测到手势，根据手的位置调整旋转
+      // handYRef.current 现在存储的是目标旋转角度 (radians)
       if (handYRef.current !== null) {
-        // 反转 Y 轴，手向上 (0) 树向上，手向下 (1) 树向下
-        const offset = (0.5 - handYRef.current) * 35;
-        targetY = 8 + offset;
+        // 平滑旋转到目标角度
+        const targetRotation = handYRef.current;
+        groupRef.current.rotation.y = MathUtils.damp(groupRef.current.rotation.y, targetRotation, 2.5, delta);
+      } else {
+        // 自动旋转 (当没有手势控制时)
+        if (sceneState === 'FORMED' && UI_CONFIG.treeRotationSpeed > 0) {
+           groupRef.current.rotation.y += delta * 0.1 * UI_CONFIG.treeRotationSpeed;
+        }
       }
       
-      // 平滑移动
+      // 平滑移动位置 (保持在中心)
       groupRef.current.position.y = MathUtils.damp(groupRef.current.position.y, targetY, 2.5, delta);
     }
   });
@@ -982,8 +986,7 @@ const Experience = ({
         dampingFactor={0.08}
         minDistance={30}
         maxDistance={120}
-        autoRotate={sceneState === 'FORMED' && UI_CONFIG.treeRotationSpeed > 0}
-        autoRotateSpeed={-0.6 * UI_CONFIG.treeRotationSpeed}
+        autoRotate={false} // 由 groupRef 手动控制旋转
         maxPolarAngle={Math.PI / 1.7}
       />
 
@@ -1229,6 +1232,11 @@ export default function GrandTreeApp() {
     handleRandomComment();
   }, [handleRandomComment]);
 
+  const handlePinchEnd = useCallback(() => {
+    // 松开捏合关闭祝福
+    setFloatingComment(prev => prev ? { ...prev, phase: 'hide' } : null);
+  }, []);
+
   // 评论框关闭后刷新评论
   const handleCommentBoxClose = useCallback(() => {
     setShowCommentBox(false);
@@ -1339,7 +1347,17 @@ export default function GrandTreeApp() {
         onGesture={setSceneState}
         onStatus={(msg: string) => console.log('[Gesture]', msg)}
         onPinchStart={handlePinchStart}
-        onHandMove={(y: number | null) => { handYRef.current = y; }}
+        onPinchEnd={handlePinchEnd}
+        onHandMove={(x: number | null, y: number | null) => { 
+          if (x !== null && y !== null) {
+            // 映射手势 X 轴到旋转角度
+            // x: 0 (left) -> 1 (right)
+            // 映射到 -PI/2 到 PI/2
+            handYRef.current = (x - 0.5) * Math.PI;
+          } else {
+            handYRef.current = null;
+          }
+        }}
         debugMode={debugMode}
       />
 
