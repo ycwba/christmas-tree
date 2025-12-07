@@ -824,7 +824,8 @@ export default function GrandTreeApp() {
           shadows={!isMobile}
           onCreated={({ gl }) => {
             gl.setClearColor(0x000000, 0);
-            gl.autoClearColor = false;
+            gl.autoClearColor = true;
+            gl.autoClear = true;
           }}
         >
             <Experience
