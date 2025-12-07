@@ -40,10 +40,10 @@ const CONFIG = {
     candyColors: ['#FF0000', '#FFFFFF']
   },
   counts: {
-    foliage: 28000,
-    ornaments: 180,   // 拍立得照片数量（降低密度）
-    elements: 200,    // 圣诞元素数量
-    lights: 400       // 彩灯数量
+    foliage: 20000,
+    ornaments: 160,   // 拍立得照片数量（降低密度）
+    elements: 180,    // 圣诞元素数量
+    lights: 200       // 彩灯数量
   },
   tree: { height: 22, radius: 9 } // 树体尺寸
 };
@@ -127,27 +127,52 @@ const DEFAULT_BACKGROUND_ID = (() => {
   return blush?.id ?? BACKGROUND_OPTIONS[0].id;
 })();
 
-// --- Shader Material (Foliage) ---
+// --- Optimized Foliage Shader (GPU-driven) ---
 const FoliageMaterial = shaderMaterial(
-  { uTime: 0, uColor: new THREE.Color(CONFIG.colors.emerald), uProgress: 0 },
-  `uniform float uTime; uniform float uProgress; attribute vec3 aTargetPos; attribute float aRandom;
-  varying vec2 vUv; varying float vMix;
-  float cubicInOut(float t) { return t < 0.5 ? 4.0 * t * t * t : 0.5 * pow(2.0 * t - 2.0, 3.0) + 1.0; }
+  { uTime: 0, uColor: new THREE.Color(CONFIG.colors.emerald), uProgress: 0, sizeMultiplier: 1 },
+  `uniform float uTime; uniform float uProgress; uniform float sizeMultiplier;
+  attribute vec3 aTargetPos; attribute float aRandom;
+  varying vec2 vUv; varying float vAlpha;
+  
+  float cubicInOut(float t) { 
+    return t < 0.5 ? 4.0 * t * t * t : 0.5 * pow(2.0 * t - 2.0, 3.0) + 1.0; 
+  }
+  
   void main() {
     vUv = uv;
-    vec3 noise = vec3(sin(uTime * 1.5 + position.x), cos(uTime + position.y), sin(uTime * 1.5 + position.z)) * 0.15;
     float t = cubicInOut(uProgress);
+    
+    // Optimize: compute noise inline without function calls
+    vec3 noise = vec3(
+      sin(uTime * 1.5 + position.x),
+      cos(uTime + position.y),
+      sin(uTime * 1.5 + position.z)
+    ) * 0.15;
+    
     vec3 finalPos = mix(position, aTargetPos + noise, t);
     vec4 mvPosition = modelViewMatrix * vec4(finalPos, 1.0);
-    gl_PointSize = (60.0 * (1.0 + aRandom)) / -mvPosition.z;
+    
+    // Dynamic sizing with depth attenuation
+    gl_PointSize = (90.0 * (1.0 + aRandom) * sizeMultiplier) / -mvPosition.z;
     gl_Position = projectionMatrix * mvPosition;
-    vMix = t;
+    
+    // Pass alpha for fade effects
+    vAlpha = mix(0.7, 1.0, t);
   }`,
-  `uniform vec3 uColor; varying float vMix;
+  `uniform vec3 uColor;
+  varying float vAlpha;
+  
   void main() {
-    float r = distance(gl_PointCoord, vec2(0.5)); if (r > 0.5) discard;
-    vec3 finalColor = mix(uColor * 0.3, uColor * 1.2, vMix);
-    gl_FragColor = vec4(finalColor, 1.0);
+    vec2 center = gl_PointCoord - 0.5;
+    float dist = length(center);
+    if (dist > 0.5) discard;
+    
+    // Soft edges for better blending
+    float alpha = smoothstep(0.5, 0.35, dist) * vAlpha;
+    
+    // Optimized color calculation
+    vec3 finalColor = uColor * (0.8 + 0.4 * (1.0 - dist * 2.0));
+    gl_FragColor = vec4(finalColor, alpha);
   }`
 );
 extend({ FoliageMaterial });
@@ -156,35 +181,69 @@ extend({ FoliageMaterial });
 const getTreePosition = () => {
   const h = CONFIG.tree.height; const rBase = CONFIG.tree.radius;
   const y = (Math.random() * h) - (h / 2); const normalizedY = (y + (h/2)) / h;
-  const currentRadius = rBase * (1 - normalizedY); const theta = Math.random() * Math.PI * 2;
+  const currentRadius = rBase * (1 - normalizedY) * 0.65; // tighter radius
+  const theta = Math.random() * Math.PI * 2;
   const r = Math.random() * currentRadius;
   return [r * Math.cos(theta), y, r * Math.sin(theta)];
 };
 
+// --- Foliage cache (avoid re-allocations) ---
+const MAX_FOLIAGE = CONFIG.counts.foliage;
+const FOLIAGE_CACHE = (() => {
+  const positions = new Float32Array(MAX_FOLIAGE * 3);
+  const targetPositions = new Float32Array(MAX_FOLIAGE * 3);
+  const randoms = new Float32Array(MAX_FOLIAGE);
+  const spherePoints = random.inSphere(new Float32Array(MAX_FOLIAGE * 3), { radius: 25 }) as Float32Array;
+  for (let i = 0; i < MAX_FOLIAGE; i++) {
+    positions[i*3] = spherePoints[i*3]; positions[i*3+1] = spherePoints[i*3+1]; positions[i*3+2] = spherePoints[i*3+2];
+    const [tx, ty, tz] = getTreePosition();
+    targetPositions[i*3] = tx; targetPositions[i*3+1] = ty; targetPositions[i*3+2] = tz;
+    randoms[i] = Math.random();
+  }
+  return { positions, targetPositions, randoms, count: MAX_FOLIAGE };
+})();
+
 // --- Component: Foliage ---
-const Foliage = ({ state, count }: { state: 'CHAOS' | 'FORMED', count: number }) => {
+const Foliage = ({ state, count, sizeMultiplier = 1 }: { state: 'CHAOS' | 'FORMED', count: number, sizeMultiplier?: number }) => {
   const materialRef = useRef<any>(null);
+  const geometryRef = useRef<THREE.BufferGeometry>(null);
+
   const { positions, targetPositions, randoms } = useMemo(() => {
-    const positions = new Float32Array(count * 3); const targetPositions = new Float32Array(count * 3); const randoms = new Float32Array(count);
-    const spherePoints = random.inSphere(new Float32Array(count * 3), { radius: 25 }) as Float32Array;
-    for (let i = 0; i < count; i++) {
-      positions[i*3] = spherePoints[i*3]; positions[i*3+1] = spherePoints[i*3+1]; positions[i*3+2] = spherePoints[i*3+2];
-      const [tx, ty, tz] = getTreePosition();
-      targetPositions[i*3] = tx; targetPositions[i*3+1] = ty; targetPositions[i*3+2] = tz;
-      randoms[i] = Math.random();
-    }
-    return { positions, targetPositions, randoms };
+    const clamped = Math.min(count, FOLIAGE_CACHE.count);
+    return {
+      positions: FOLIAGE_CACHE.positions.subarray(0, clamped * 3),
+      targetPositions: FOLIAGE_CACHE.targetPositions.subarray(0, clamped * 3),
+      randoms: FOLIAGE_CACHE.randoms.subarray(0, clamped)
+    };
   }, [count]);
+  // Optimize: batch uniform updates, avoid per-frame overhead
   useFrame((rootState, delta) => {
-    if (materialRef.current) {
-      materialRef.current.uTime = rootState.clock.elapsedTime;
-      const targetProgress = state === 'FORMED' ? 1 : 0;
-      materialRef.current.uProgress = MathUtils.damp(materialRef.current.uProgress, targetProgress, 1.5, delta);
+    if (!materialRef.current) return;
+    
+    const mat = materialRef.current;
+    mat.uTime = rootState.clock.elapsedTime;
+    
+    const targetProgress = state === 'FORMED' ? 1 : 0;
+    const newProgress = MathUtils.damp(mat.uProgress, targetProgress, 1.5, delta);
+    
+    // Only update if changed significantly (reduce GPU uploads)
+    if (Math.abs(newProgress - mat.uProgress) > 0.001) {
+      mat.uProgress = newProgress;
     }
+    
+    mat.sizeMultiplier = sizeMultiplier;
   });
+
+  useEffect(() => {
+    if (geometryRef.current) {
+      geometryRef.current.setDrawRange(0, positions.length / 3);
+      geometryRef.current.computeBoundingSphere();
+    }
+  }, [positions]);
+
   return (
     <points>
-      <bufferGeometry>
+      <bufferGeometry ref={geometryRef}>
         <bufferAttribute attach="attributes-position" args={[positions, 3]} />
         <bufferAttribute attach="attributes-aTargetPos" args={[targetPositions, 3]} />
         <bufferAttribute attach="attributes-aRandom" args={[randoms, 1]} />
@@ -522,13 +581,10 @@ const TopStar = ({ state, onClick }: { state: 'CHAOS' | 'FORMED', onClick: () =>
 };
 
 // --- Main Scene Experience ---
-const Experience = ({ sceneState, rotationSpeed, photoUrls, onStarClick, onPhotoOpen, ornamentsRef, fogColor, isMobile, counts }: { sceneState: 'CHAOS' | 'FORMED', rotationSpeed: number, photoUrls: string[], onStarClick: () => void, onPhotoOpen: (p: PhotoOpenPayload) => void, ornamentsRef: React.RefObject<PhotoOrnamentsHandle>, fogColor: string, isMobile: boolean, counts: typeof CONFIG.counts }) => {
+const Experience = ({ sceneState, photoUrls, onStarClick, onPhotoOpen, ornamentsRef, fogColor, isMobile, counts }: { sceneState: 'CHAOS' | 'FORMED', photoUrls: string[], onStarClick: () => void, onPhotoOpen: (p: PhotoOpenPayload) => void, ornamentsRef: React.RefObject<PhotoOrnamentsHandle>, fogColor: string, isMobile: boolean, counts: typeof CONFIG.counts }) => {
   const controlsRef = useRef<any>(null);
   useFrame(() => {
-    if (controlsRef.current) {
-      controlsRef.current.setAzimuthalAngle(controlsRef.current.getAzimuthalAngle() + rotationSpeed);
-      controlsRef.current.update();
-    }
+    if (controlsRef.current) controlsRef.current.update();
   });
 
   return (
@@ -542,31 +598,30 @@ const Experience = ({ sceneState, rotationSpeed, photoUrls, onStarClick, onPhoto
         dampingFactor={0.08}
         minDistance={30}
         maxDistance={120}
-        autoRotate={rotationSpeed === 0 && sceneState === 'FORMED'}
-        autoRotateSpeed={0.3}
+        autoRotate={sceneState === 'FORMED'}
+        autoRotateSpeed={-0.6}
         maxPolarAngle={Math.PI / 1.7}
       />
 
       <fog attach="fog" args={[fogColor, 40, 140]} />
-      <Stars radius={100} depth={50} count={5000} factor={4} saturation={0} fade speed={1} />
+      <Stars radius={100} depth={50} count={1200} factor={3.2} saturation={0} fade speed={1} />
       <Environment preset="night" background={false} />
-      <Sparkles count={isMobile ? 400 : 800} scale={[120, 120, 120]} size={2} speed={0.18} opacity={0.12} color="#cfe9ff" />
 
       <ambientLight intensity={0.4} color="#003311" />
       <pointLight position={[30, 30, 30]} intensity={100} color={CONFIG.colors.warmLight} />
       <pointLight position={[-30, 10, -30]} intensity={50} color={CONFIG.colors.gold} />
       <pointLight position={[0, -20, 10]} intensity={30} color="#ffffff" />
 
-      <group position={[0, 2, 0]}>
+      <group position={[0, 8, 0]}>
         {sceneState === 'FORMED' && <Trunk />}
-        <Foliage state={sceneState} count={counts.foliage} />
+        <Foliage state={sceneState} count={Math.floor(counts.foliage * 0.5)} sizeMultiplier={1.6} />
         <Suspense fallback={null}>
           <PhotoOrnaments ref={ornamentsRef} state={sceneState} photoUrls={photoUrls} onPhotoOpen={onPhotoOpen} ornamentCount={counts.ornaments} />
            <ChristmasElements state={sceneState} count={counts.elements} />
            <FairyLights state={sceneState} count={counts.lights} />
             <TopStar state={sceneState} onClick={onStarClick} />
         </Suspense>
-        <Sparkles count={isMobile ? Math.floor(counts.lights * 0.8) : 400} scale={50} size={7} speed={0.35} opacity={0.35} color={CONFIG.colors.silver} />
+        <Sparkles count={isMobile ? 120 : 220} scale={45} size={6.5} speed={0.32} opacity={0.3} color={CONFIG.colors.silver} />
       </group>
 
       {!isMobile && (
@@ -580,7 +635,7 @@ const Experience = ({ sceneState, rotationSpeed, photoUrls, onStarClick, onPhoto
 
 // --- Gesture Controller ---
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-const GestureController = ({ onGesture, onMove, onStatus, onPinchStart, onPinchEnd, debugMode }: any) => {
+const GestureController = ({ onGesture, onStatus, onPinchStart, onPinchEnd, debugMode }: any) => {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const pinchActiveRef = useRef(false);
@@ -654,9 +709,6 @@ const GestureController = ({ onGesture, onMove, onStatus, onPinchStart, onPinchE
 
             if (results.landmarks.length > 0) {
               const hand = results.landmarks[0];
-              const speed = (0.5 - hand[0].x) * 0.15;
-              onMove(Math.abs(speed) > 0.01 ? speed : 0);
-
               const pinchBlocked = Date.now() < pinchBlockUntilRef.current;
 
               // 只在没有握拳/张手手势且不在屏蔽期时才允许捏合
@@ -683,7 +735,6 @@ const GestureController = ({ onGesture, onMove, onStatus, onPinchStart, onPinchE
                 if (onPinchEnd) onPinchEnd();
               }
             } else { 
-              onMove(0); 
               if (debugMode) onStatus("AI READY: NO HAND"); 
             }
         }
@@ -692,7 +743,7 @@ const GestureController = ({ onGesture, onMove, onStatus, onPinchStart, onPinchE
     };
     setup();
     return () => cancelAnimationFrame(requestRef);
-  }, [onGesture, onMove, onStatus, onPinchEnd, onPinchStart, debugMode]);
+  }, [onGesture, onStatus, onPinchEnd, onPinchStart, debugMode]);
 
   return (
     <>
@@ -705,7 +756,6 @@ const GestureController = ({ onGesture, onMove, onStatus, onPinchStart, onPinchE
 // --- App Entry ---
 export default function GrandTreeApp() {
   const [sceneState, setSceneState] = useState<'CHAOS' | 'FORMED'>('CHAOS');
-  const [rotationSpeed, setRotationSpeed] = useState(0);
   const [debugMode, setDebugMode] = useState(false);
   const [backgroundId, setBackgroundId] = useState<string>(DEFAULT_BACKGROUND_ID);
   const [isMobile, setIsMobile] = useState(() => (typeof window !== 'undefined' ? window.innerWidth <= 820 : false));
@@ -718,10 +768,10 @@ export default function GrandTreeApp() {
 
   const counts = useMemo(() => (
     isMobile ? {
-      foliage: 18000,
-      ornaments: 140,
-      elements: 140,
-      lights: 260
+      foliage: 12000,
+      ornaments: 90,
+      elements: 110,
+      lights: 120
     } : CONFIG.counts
   ), [isMobile]);
 
@@ -810,12 +860,12 @@ export default function GrandTreeApp() {
       )}
       <div className="canvas-wrap">
         <Canvas
-          dpr={isMobile ? [1, 1] : [1, 1.5]}
+          dpr={isMobile ? [1, 1.3] : [1, 2]}
           gl={{
             toneMapping: THREE.ReinhardToneMapping,
             alpha: true,
             antialias: true,
-            preserveDrawingBuffer: true,
+            preserveDrawingBuffer: !isMobile,
             powerPreference: 'high-performance',
             stencil: false,
             depth: true
@@ -826,11 +876,17 @@ export default function GrandTreeApp() {
             gl.setClearColor(0x000000, 0);
             gl.autoClearColor = true;
             gl.autoClear = true;
+            const canvas = gl.getContext()?.canvas as HTMLCanvasElement | undefined;
+            if (canvas) {
+              canvas.addEventListener('webglcontextlost', (e) => {
+                e.preventDefault();
+                console.warn('WebGL context lost');
+              }, { passive: false });
+            }
           }}
         >
             <Experience
               sceneState={sceneState}
-              rotationSpeed={rotationSpeed}
               photoUrls={photoUrls}
               onStarClick={handleStarClick}
               onPhotoOpen={handlePhotoOpen}
@@ -844,7 +900,6 @@ export default function GrandTreeApp() {
 
       <GestureController
         onGesture={setSceneState}
-        onMove={setRotationSpeed}
         onStatus={() => {}}
         onPinchStart={handlePinchStart}
         onPinchEnd={handlePinchEnd}
